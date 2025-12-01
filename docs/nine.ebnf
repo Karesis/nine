@@ -1,0 +1,168 @@
+///=== Atoms ===///
+Identifier -> IDENT 
+Number     -> INT | FLOAT
+Literal    -> Number | STRING_LITERAL | CHAR_LITERAL | BYTE_LITERAL | "true" | "false"
+
+// 路径：用于模块访问 (std::io::File)
+Path       -> Identifier { "::" Identifier }
+
+///=== Types ===///
+Type        -> PointerType | ArrayOrAtom
+PointerType -> ( "*" | "^" ) Type          // * = mut ptr, ^ = const ptr
+ArrayOrAtom -> AtomType { "[" INT "]" }    // 数组后缀
+
+AtomType    -> PrimitiveType
+             | FunctionType
+             | Path             
+             | "(" Type ")"
+
+PrimitiveType -> "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "i64" | "u64" | "iz" | "uz" 
+               | "f32" | "f64" | "bool"
+
+FunctionType  -> "fn" "(" [ TypeList ] ")" [ "->" Type ]
+TypeList      -> Type { "," Type }
+
+///=== Expressions ===///
+Expression     -> LogicOr
+
+// 逻辑运算 (Keywords)
+LogicOr        -> LogicAnd { "or" LogicAnd }
+LogicAnd       -> Equality { "and" Equality }
+
+// 比较运算
+Equality       -> Relational { ( "==" | "!=" ) Relational }
+Relational     -> Additive { ( "<" | "<=" | ">" | ">=" ) Additive }
+
+// 算术运算 (包含按位运算)
+// 按位与使用 "band", 按位或使用 "bor", 异或 "xor" 
+Additive       -> Multiplicative { ( "+" | "-" | "bor" | "xor" ) Multiplicative }
+Multiplicative -> Unary { ( "*" | "/" | "%" | "band" ) Unary }
+
+// 前缀运算
+// 修正：删除了 "&"，因为它现在是后缀
+Unary      -> ( "-" | "!" ) Unary 
+            | Postfix
+
+// 后缀运算
+Postfix    -> Primary { 
+                  "(" [Arguments] ")" | // Function Call
+                  "[" Expression "]"  | // Index
+                  "^"                 | // Dereference (Suffix: ptr -> val)
+                  "&"                 | // Address-of (Suffix: val -> ptr)
+                  "as" Type           | // raw cast
+                  "." Identifier      | // Method Call / Field Access
+                  "::" Identifier       // Namespace Access
+              }
+
+Primary    -> Literal
+            | Path               // 支持路径作为值 (Enum Variant / Static Var)
+            | StructLiteral      // 结构体初始化
+            | "(" Expression ")"
+
+Arguments  -> Expression { "," Expression }
+
+///=== Statements ===///
+Statement  -> DeclStmt
+            | AssignStmt
+            | CallStmt
+            | IfStmt
+            | WhileStmt
+            | BreakStmt     
+            | ContinueStmt  
+            | ReturnStmt
+            | Block
+            | SwitchStmt
+
+// 语义：
+// 1. mut vec: Vector; -> 在栈上分配 sizeof(Vector) 的空间，内容未定义(脏内存)。
+// 2. mut vec: Vector = ...; -> 分配并初始化。
+DeclStmt   -> VarModifier Identifier ":" Type [ "=" Expression ] ";"
+
+VarModifier -> "set" | "mut" | "const"
+
+// 赋值 (LValue 必须是 Postfix 的子集)
+AssignStmt -> Postfix "=" Expression ";"
+
+// 过程调用
+CallStmt   -> Postfix ";" 
+
+Block      -> "{" { Statement } "}"
+
+IfStmt     -> "if" "(" Expression ")" Block [ "else" ( Block | IfStmt ) ]
+WhileStmt  -> "while" "(" Expression ")" [ ":" DeclStmt ] Block
+ReturnStmt -> "ret" [ Expression ] ";"
+BreakStmt    -> "break" ";"
+ContinueStmt -> "continue" ";"
+
+///=== Switch 语句 ===///
+
+// 结构：switch (expr) { case... default... }
+// DefaultCase 设为可选，放在最后
+SwitchStmt   -> "switch" "(" Expression ")" "{" { SwitchCase } [ DefaultCase ] "}"
+
+// 分支定义
+// 逻辑：Pattern -> Statement
+// 因为 Statement 包含 Block，所以自然支持:
+// 1. -> { ... }  (多行)
+// 2. -> stmt;    (单行，不带花括号)
+SwitchCase   -> CasePatterns "->" Statement
+
+// 模式列表 (支持多选)
+// 比如: Color::Red | Color::Blue
+CasePatterns -> Expression { "|" Expression }
+
+// 默认分支
+DefaultCase  -> "default" "->" Statement
+
+///=== Top Level ===///
+Program      -> { TopLevelDecl }
+TopLevelDecl -> StructDecl | TypeImpDecl | FnDecl | UnionDecl | EnumDecl | ModuleDecl | ImportDecl | TypedefDecl | TypeAliasDecl 
+
+// 模块系统
+ModuleDecl -> [ "pub" ] "mod" Identifier ";"
+ImportDecl -> [ "pub" ] "use" Path [ "as" Identifier ] ";"
+
+// 结构体
+StructDecl   -> "struct" [ "(" INT ")" ] Identifier "{" { StructMember } "}"
+StructMember -> FieldDecl | StaticFnDecl
+FieldDecl    -> Identifier ":" Type ";"
+StaticFnDecl -> FnDecl
+
+// 类型实现 (Methods)
+// Type 可以是 "Point", "*Point", "^Point"
+TypeImpDecl     -> "imp" "for" Type "{" { MethodDecl } "}"
+
+// 方法定义
+// 修正：SelfParam 简化为只有 "self"
+MethodDecl      -> ["pub"] "fn" Identifier "(" MethodParamList ")" [ "->" Type ] Block 
+MethodParamList -> SelfParam [ "," ParamList ] 
+                 | ParamList
+
+// 语义定义：
+// 1. "self"       -> 默认不可变绑定 (immutable binding)
+// 2. "mut self"   -> 可变绑定 (mutable binding)
+// 3. "const self" -> 编译时常量绑定 (compile-time constant)
+SelfParam       -> [ "mut" | "const" ] "self"
+
+// 普通函数
+FnDecl     -> ["pub"] "fn" Identifier "(" [ ParamList ] ")" [ "->" Type ] Block 
+ParamList  -> Param { "," Param }
+Param           -> [ "mut" | "const" ] Identifier ":" Type
+
+// 联合体 
+UnionDecl     -> "union" Identifier "{" { StructMember } "}"
+
+// 枚举 (统一化)
+// 分隔符改为分号，支持变体和静态方法
+EnumDecl      -> "enum" Identifier [ ":" IntType ] "{" { EnumMember } "}"
+
+EnumMember    -> EnumVariant | StaticFnDecl
+EnumVariant   -> Identifier [ "=" INT ] ";"   
+
+// 1. 类型定义 (强类型 - New Type)
+// 语义：创建一个全新的类型，与原类型不兼容（需要显式转换）
+TypedefDecl   -> "typedef" Identifier "=" Type ";"
+
+// 2. 类型别名 (弱类型 - Alias)
+// 语义：完全等价于原类型，只是换个名字
+TypeAliasDecl -> "typealias" Identifier "=" Type ";"

@@ -1,0 +1,285 @@
+use crate::token::{Token, TokenKind};
+
+pub struct Lexer<'a> {
+    src: &'a str,
+    chars: std::iter::Peekable<std::str::Chars<'a>>,
+
+    /// 当前字符的字节偏移量
+    current_pos: usize,
+    /// 当前 Token 开始的字节偏移量
+    start_pos: usize,
+}
+
+impl<'a> Lexer<'a> {
+    pub fn new(src: &'a str) -> Self {
+        Self {
+            src,
+            chars: src.chars().peekable(),
+            current_pos: 0,
+            start_pos: 0,
+        }
+    }
+
+    /// 核心入口：获取下一个 Token
+    pub fn next_token(&mut self) -> Token {
+        self.skip_whitespace_and_comments();
+
+        self.start_pos = self.current_pos;
+
+        let c = match self.advance() {
+            Some(c) => c,
+            None => return self.make_token(TokenKind::EOF),
+        };
+
+        match c {
+            // 1. 标识符与关键字 (Start with a-z, A-Z, _)
+            c if is_ident_start(c) => self.scan_identifier(),
+
+            // 2. 数字 (Start with 0-9)
+            c if c.is_ascii_digit() => self.scan_number(),
+
+            // 3. 字符串与字符
+            '"' => self.scan_string(),
+            '\'' => self.scan_char(),
+
+            // 4. 单字符与双字符符号
+            '(' => self.make_token(TokenKind::LParen),
+            ')' => self.make_token(TokenKind::RParen),
+            '{' => self.make_token(TokenKind::LBrace),
+            '}' => self.make_token(TokenKind::RBrace),
+            '[' => self.make_token(TokenKind::LBracket),
+            ']' => self.make_token(TokenKind::RBracket),
+            ',' => self.make_token(TokenKind::Comma),
+            ';' => self.make_token(TokenKind::Semi),
+            '+' => self.make_token(TokenKind::Plus),
+            '*' => self.make_token(TokenKind::Star),
+            '/' => self.make_token(TokenKind::Slash),
+            '%' => self.make_token(TokenKind::Percent),
+            '^' => self.make_token(TokenKind::Caret), // Ptr / Deref
+            '&' => self.make_token(TokenKind::Ampersand), // AddrOf
+            '|' => self.make_token(TokenKind::Pipe),  // Switch pattern
+
+            // 需要向前看一位 (Lookahead) 的符号
+            '.' => {
+                // 处理浮点数开头是小数点的情况 (如 .5)，虽然 EBNF 没明确写，但通常支持
+                // 如果 . 后面是数字，且前面是空白/符号，怎么算？
+                // 为简单起见，这里严格遵循 EBNF: Number -> INT | FLOAT，通常 FLOAT 是 0.5
+                // 所以 . 就是 Dot
+                self.make_token(TokenKind::Dot)
+            }
+
+            ':' => {
+                if self.match_char(':') {
+                    self.make_token(TokenKind::ColonColon)
+                } else {
+                    self.make_token(TokenKind::Colon)
+                }
+            }
+
+            '=' => {
+                if self.match_char('=') {
+                    self.make_token(TokenKind::EqEq)
+                } else {
+                    self.make_token(TokenKind::Eq)
+                }
+            }
+
+            '!' => {
+                if self.match_char('=') {
+                    self.make_token(TokenKind::NeEq)
+                } else {
+                    self.make_token(TokenKind::Bang)
+                }
+            }
+
+            '<' => {
+                if self.match_char('=') {
+                    self.make_token(TokenKind::LtEq)
+                } else {
+                    self.make_token(TokenKind::Lt)
+                }
+            }
+
+            '>' => {
+                if self.match_char('=') {
+                    self.make_token(TokenKind::GtEq)
+                } else {
+                    self.make_token(TokenKind::Gt)
+                }
+            }
+
+            '-' => {
+                if self.match_char('>') {
+                    self.make_token(TokenKind::Arrow)
+                } else {
+                    self.make_token(TokenKind::Minus)
+                }
+            }
+
+            // 未知字符
+            _ => self.make_token(TokenKind::ERROR),
+        }
+    }
+
+    // === 具体的扫描函数 ===
+
+    fn scan_identifier(&mut self) -> Token {
+        while let Some(&c) = self.chars.peek() {
+            if is_ident_continue(c) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        // 提取文本
+        let text = &self.src[self.start_pos..self.current_pos];
+
+        // 检查是否是关键字
+        // TokenKind::lookup_keyword 是我们在 macro 里生成的函数
+        let kind = TokenKind::lookup_keyword(text).unwrap_or(TokenKind::Identifier);
+
+        self.make_token(kind)
+    }
+
+    fn scan_number(&mut self) -> Token {
+        // 扫描整数部分
+        while let Some(&c) = self.chars.peek() {
+            if c.is_ascii_digit() || c == '_' {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        // 扫描小数部分
+        // 只有当 '.' 后面紧跟数字时，才视为浮点数
+        // 避免 range 操作 `0..10` 被误判（虽然本语言只有 `::`）
+        // 也要处理 `1.method()` 的情况。通常 `1.` 被视为浮点，`1.f` 也是。
+        // 简单策略：如果遇到 . 且后面是数字，则吞噬
+        if let Some(&'.') = self.chars.peek() {
+            // 查看下一位，但不消耗
+            let mut iter_clone = self.chars.clone();
+            iter_clone.next(); // 越过 .
+            if let Some(next_c) = iter_clone.next() {
+                if next_c.is_ascii_digit() {
+                    // 确认是浮点数
+                    self.advance(); // 吞掉 .
+                    while let Some(&c) = self.chars.peek() {
+                        if c.is_ascii_digit() || c == '_' {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    return self.make_token(TokenKind::Float);
+                }
+            }
+        }
+
+        self.make_token(TokenKind::Integer)
+    }
+
+    fn scan_string(&mut self) -> crate::token::Token {
+        // 已消耗了开头的 "
+        while let Some(&c) = self.chars.peek() {
+            match c {
+                '"' => {
+                    self.advance(); // 闭合引号
+                    return self.make_token(TokenKind::StringLit);
+                }
+                '\\' => {
+                    // 转义：吞掉 \ 和下一个字符
+                    self.advance();
+                    self.advance();
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+        // 如果循环结束还没遇到 "，说明 EOF 了，报错
+        self.make_token(TokenKind::ERROR)
+    }
+
+    fn scan_char(&mut self) -> crate::token::Token {
+        // 已消耗了开头的 '
+        // 简单处理：'a', '\n', '\t'
+        if let Some(&c) = self.chars.peek() {
+            if c == '\\' {
+                self.advance(); // \
+                self.advance(); // n, t, etc.
+            } else {
+                self.advance();
+            }
+        }
+
+        if self.match_char('\'') {
+            self.make_token(TokenKind::CharLit)
+        } else {
+            self.make_token(TokenKind::ERROR)
+        }
+    }
+
+    // === 辅助函数 ===
+
+    fn advance(&mut self) -> Option<char> {
+        let c = self.chars.next()?;
+        self.current_pos += c.len_utf8();
+        Some(c)
+    }
+
+    fn match_char(&mut self, expected: char) -> bool {
+        if let Some(&c) = self.chars.peek() {
+            if c == expected {
+                self.advance();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 跳过空白和注释
+    fn skip_whitespace_and_comments(&mut self) {
+        while let Some(&c) = self.chars.peek() {
+            match c {
+                ' ' | '\t' | '\r' | '\n' => {
+                    self.advance();
+                }
+                '/' => {
+                    // 预读一位，看是不是 //
+                    let mut lookahead = self.chars.clone();
+                    lookahead.next();
+                    if let Some('/') = lookahead.next() {
+                        // 是注释，吞掉当前行
+                        self.advance(); // /
+                        self.advance(); // /
+                        while let Some(&c) = self.chars.peek() {
+                            if c == '\n' {
+                                break;
+                            }
+                            self.advance();
+                        }
+                    } else {
+                        // 只是一个除号 /，不是空白，停止跳过
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    fn make_token(&self, kind: TokenKind) -> crate::token::Token {
+        crate::token::Token::new(kind, self.start_pos, self.current_pos)
+    }
+}
+
+// 独立的字符判断函数，保持代码整洁
+fn is_ident_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_'
+}
+
+fn is_ident_continue(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
