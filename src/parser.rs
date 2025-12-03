@@ -78,6 +78,7 @@ pub struct Parser<'a> {
     pub errors: Vec<ParseError>,
     // 专门用于错误恢复：记录上一个被 consume 的 token 类型
     previous_kind: TokenKind,
+    node_id_counter: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -89,6 +90,7 @@ impl<'a> Parser<'a> {
             // 初始化为 EOF，表示“还没有任何历史”
             // 只要不是 TokenKind::Semi 就可以，EOF 是最无害的
             previous_kind: TokenKind::EOF,
+            node_id_counter: 0,
         }
     }
 
@@ -210,6 +212,13 @@ impl<'a> Parser<'a> {
     /// 获取 Token 对应的源码文本
     pub fn text(&self, token: Token) -> &'a str {
         token.text(self.source)
+    }
+
+    /// 核心辅助函数：分配下一个 ID
+    fn next_id(&mut self) -> NodeId {
+        let id = self.node_id_counter;
+        self.node_id_counter += 1;
+        NodeId(id)
     }
 
 }
@@ -455,6 +464,7 @@ impl<'a> Parser<'a> {
             
             let span = Span::new(lhs.span.start, rhs.span.end);
             lhs = Expression {
+                id: self.next_id(),
                 kind: ExpressionKind::Binary { lhs: Box::new(lhs), op, rhs: Box::new(rhs) },
                 span,
             };
@@ -472,6 +482,7 @@ impl<'a> Parser<'a> {
             
             let span = Span::new(lhs.span.start, rhs.span.end);
             lhs = Expression {
+                id:self.next_id(),
                 kind: ExpressionKind::Binary { lhs: Box::new(lhs), op, rhs: Box::new(rhs) },
                 span,
             };
@@ -493,6 +504,7 @@ impl<'a> Parser<'a> {
             
             let span = Span::new(lhs.span.start, rhs.span.end);
             lhs = Expression {
+                id: self.next_id(),
                 kind: ExpressionKind::Binary { lhs: Box::new(lhs), op, rhs: Box::new(rhs) },
                 span,
             };
@@ -516,6 +528,7 @@ impl<'a> Parser<'a> {
             
             let span = Span::new(lhs.span.start, rhs.span.end);
             lhs = Expression {
+                id: self.next_id(),
                 kind: ExpressionKind::Binary { lhs: Box::new(lhs), op, rhs: Box::new(rhs) },
                 span,
             };
@@ -540,6 +553,7 @@ impl<'a> Parser<'a> {
             
             let span = Span::new(lhs.span.start, rhs.span.end);
             lhs = Expression {
+                id: self.next_id(),
                 kind: ExpressionKind::Binary { lhs: Box::new(lhs), op, rhs: Box::new(rhs) },
                 span,
             };
@@ -563,6 +577,7 @@ impl<'a> Parser<'a> {
             
             let span = Span::new(lhs.span.start, rhs.span.end);
             lhs = Expression {
+                id: self.next_id(),
                 kind: ExpressionKind::Binary { lhs: Box::new(lhs), op, rhs: Box::new(rhs) },
                 span,
             };
@@ -586,6 +601,7 @@ impl<'a> Parser<'a> {
             let span = Span::new(start, operand.span.end);
             
             return Ok(Expression {
+                id: self.next_id(),
                 kind: ExpressionKind::Unary { op, operand: Box::new(operand) },
                 span,
             });
@@ -608,6 +624,7 @@ impl<'a> Parser<'a> {
                 let span = Span::new(expr.span.start, end_token.span.end);
                 
                 expr = Expression {
+                    id: self.next_id(),
                     kind: ExpressionKind::Call { callee: Box::new(expr), arguments: args },
                     span,
                 };
@@ -619,6 +636,7 @@ impl<'a> Parser<'a> {
                 let span = Span::new(expr.span.start, end_token.span.end);
 
                 expr = Expression {
+                    id: self.next_id(),
                     kind: ExpressionKind::Index { target: Box::new(expr), index: Box::new(index) },
                     span,
                 };
@@ -638,6 +656,7 @@ impl<'a> Parser<'a> {
                     let span = Span::new(expr.span.start, end_token.span.end);
 
                     expr = Expression {
+                        id: self.next_id(),
                         kind: ExpressionKind::MethodCall { 
                             receiver: Box::new(expr), 
                             method_name: ident, 
@@ -649,6 +668,7 @@ impl<'a> Parser<'a> {
                     // 只是字段访问
                     let span = Span::new(expr.span.start, name.span.end);
                     expr = Expression {
+                        id: self.next_id(),
                         kind: ExpressionKind::FieldAccess { receiver: Box::new(expr), field_name: ident },
                         span,
                     };
@@ -660,6 +680,7 @@ impl<'a> Parser<'a> {
                 let span = Span::new(expr.span.start, target_type.span.end);
                 
                 expr = Expression {
+                    id: self.next_id(),
                     kind: ExpressionKind::Cast { expr: Box::new(expr), target_type },
                     span,
                 };
@@ -668,6 +689,7 @@ impl<'a> Parser<'a> {
                 // 5. 后缀解引用: ptr^
                 let span = Span::new(expr.span.start, self.previous_span().end);
                 expr = Expression {
+                    id: self.next_id(),
                     kind: ExpressionKind::Unary { op: UnaryOperator::Dereference, operand: Box::new(expr) },
                     span,
                 };
@@ -676,6 +698,7 @@ impl<'a> Parser<'a> {
                 // 6. 后缀取地址: val&
                 let span = Span::new(expr.span.start, self.previous_span().end);
                 expr = Expression {
+                    id: self.next_id(),
                     kind: ExpressionKind::Unary { op: UnaryOperator::AddressOf, operand: Box::new(expr) },
                     span,
                 };
@@ -688,6 +711,7 @@ impl<'a> Parser<'a> {
                 
                 // 明确使用 StaticAccess
                 expr = Expression {
+                    id: self.next_id(),
                     kind: ExpressionKind::StaticAccess { 
                         target: Box::new(expr), 
                         member: ident 
@@ -712,6 +736,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let lit = self.token_to_literal(token)?;
                 Ok(Expression {
+                    id: self.next_id(),
                     kind: ExpressionKind::Literal(lit),
                     span: token.span,
                 })
@@ -739,6 +764,7 @@ impl<'a> Parser<'a> {
                 } else {
                     // 否则就是纯路径（变量名/枚举值）
                     Ok(Expression {
+                        id: self.next_id(),
                         kind: ExpressionKind::Path(path.clone()),
                         span: path.span,
                     })
@@ -749,6 +775,7 @@ impl<'a> Parser<'a> {
             TokenKind::SelfVal => {
                 let tok = self.advance();
                 Ok(Expression {
+                    id: self.next_id(),
                     // 将 self 视为名为 "self" 的 Path
                     kind: ExpressionKind::Path(Path { 
                         segments: vec![Identifier { name: "self".to_string(), span: tok.span }], 
@@ -813,6 +840,7 @@ impl<'a> Parser<'a> {
         let end_tok = self.expect(TokenKind::RBrace)?;
         
         Ok(Expression {
+            id: self.next_id(),
             kind: ExpressionKind::StructLiteral { type_name, fields },
             span: Span::new(start, end_tok.span.end),
         })
@@ -825,7 +853,6 @@ impl<'a> Parser<'a> {
             TokenKind::False => Ok(Literal::Boolean(false)),
             TokenKind::Integer => {
                 // 处理 0xFF, 1_000 等，Rust parse 支持部分，
-                // 如果你自己有特殊格式，这里需要专门处理
                 let val = text.replace('_', "").parse::<u64>().map_err(|_| ParseError{
                     expected: "Integer".into(), found: token.kind, span: token.span, message: "Invalid integer".into()
                 })?;
@@ -1262,7 +1289,7 @@ impl<'a> Parser<'a> {
         let end = self.expect(TokenKind::Semi)?.span.end;
         
         Ok(Item {
-            kind: ItemKind::ModuleDecl { name, is_pub },
+            kind: ItemKind::ModuleDecl { name, is_pub, items: None},
             span: Span::new(start, end),
         })
     }

@@ -101,8 +101,12 @@ pub enum PrimitiveType {
 /// 2. 表达式
 /// ======================================================
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId(pub u32);
+
 #[derive(Debug, Clone)]
 pub struct Expression {
+    pub id: NodeId,
     pub kind: ExpressionKind,
     pub span: Span,
 }
@@ -285,9 +289,12 @@ pub struct Item {
 #[derive(Debug, Clone)]
 pub enum ItemKind {
     /// 模块声明: mod xxx;
+    /// 解析初期：items 为 None
+    /// Driver解析后：items 为 Some(Vec<Item>)，即子模块的内容被填入这里
     ModuleDecl {
         name: Identifier,
         is_pub: bool,
+        items: Option<Vec<Item>>, // <--- 新增这个字段
     },
     
     /// 导入: use path as alias;
