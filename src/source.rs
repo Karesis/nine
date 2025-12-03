@@ -2,6 +2,7 @@
 /// 1. 基础类型: Span 与FileId
 /// ======================================================
 use std::ops::Range;
+use std::path::PathBuf;
 
 /// 简单的文件句柄，避免到处传 String
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,6 +32,8 @@ impl Span {
 
 #[derive(Debug)]
 pub struct SourceFile {
+    /// 真实的文件路径 (新增!)
+    pub path: PathBuf,
     /// 文件名 (用于报错显示)
     pub name: String,
     /// 完整源码
@@ -38,18 +41,24 @@ pub struct SourceFile {
     /// 每一行开始的字节偏移量缓存
     /// lines[0] = 0, lines[1] = 第一行结束位置+1...
     pub line_starts: Vec<usize>,
+    /// 该文件在虚拟全局空间中的起始偏移量
+    pub start_pos: usize,
 }
 
 impl SourceFile {
-    pub fn new(name: String, src: String) -> Self {
+    pub fn new(path: PathBuf, src: String, start_pos: usize) -> Self {
         let line_starts = std::iter::once(0)
             .chain(src.match_indices('\n').map(|(i, _)| i + 1))
             .collect();
 
+        let name = path.to_string_lossy().to_string();
+
         Self {
+            path,
             name,
             src,
             line_starts,
+            start_pos,
         }
     }
 
@@ -81,24 +90,52 @@ use std::path::Path;
 #[derive(Debug)]
 pub struct SourceManager {
     files: Vec<SourceFile>,
+    /// 下一个文件应该从哪个全局偏移量开始
+    next_offset: usize,
 }
 
 impl SourceManager {
     pub fn new() -> Self {
-        Self { files: Vec::new() }
+        Self { files: Vec::new(), next_offset: 0}
     }
 
     /// 加载文件并返回 ID
     pub fn load_file<P: AsRef<Path>>(&mut self, path: P) -> io::Result<FileId> {
-        let src = fs::read_to_string(path.as_ref())?;
-        let name = path.as_ref().to_string_lossy().to_string(); //? 这里为什么要用to_string_lossy?为了兼容？
+        let path = path.as_ref();
+        let abs_path = fs::canonicalize(path)?;
 
-        self.add_file(name, src)
+        if let Some((id, _)) = self.files.iter().enumerate().find(|(_, f)| f.path == abs_path) {
+            return Ok(FileId(id));
+        }
+
+        let src = fs::read_to_string(&abs_path)?;
+        let len = src.len();
+        
+        // 分配全局偏移量
+        let start_pos = self.next_offset;
+        // 更新下一个文件的起点（+1 是为了避免粘连，虽然没啥必要）
+        self.next_offset += len + 1; 
+
+        let file = SourceFile::new(abs_path, src, start_pos);
+        
+        let id = FileId(self.files.len());
+        self.files.push(file);
+        Ok(id)
+    }
+
+    /// 获取文件所在的目录 (核心功能：用于解析相对路径的 import)
+    pub fn get_file_dir(&self, id: FileId) -> PathBuf {
+        let file = &self.files[id.0];
+        // 如果是文件，取父目录；如果是根目录等特殊情况，这就得小心了
+        file.path.parent().unwrap_or(Path::new(".")).to_path_buf()
     }
 
     /// 直接添加字符串（用于测试或 REPL）
     pub fn add_file(&mut self, name: String, src: String) -> io::Result<FileId> {
-        let file = SourceFile::new(name, src);
+        let len = src.len();
+        let start_pos = self.next_offset;
+        self.next_offset += len + 1;
+        let file = SourceFile::new(PathBuf::from(name), src, start_pos);
         let id = FileId(self.files.len());
         self.files.push(file);
         Ok(id)
@@ -112,5 +149,21 @@ impl SourceManager {
     /// 获取源码片段
     pub fn get_source(&self, id: FileId, span: Span) -> &str {
         &self.files[id.0].src[span.as_range()]
+    }
+
+    // === 核心新增：通过全局 Span 查找文件和局部位置 ===
+    pub fn lookup_source(&self, span: Span) -> Option<(&SourceFile, usize, usize)> {
+        // 二分查找或者线性查找哪个文件包含了 span.start
+        // 因为文件是按顺序加载的，start_pos 是递增的
+        for file in &self.files {
+            let file_end = file.start_pos + file.src.len();
+            if span.start >= file.start_pos && span.start < file_end {
+                // 找到了！计算局部偏移量
+                let local_start = span.start - file.start_pos;
+                let (line, col) = file.lookup_location(local_start);
+                return Some((file, line, col));
+            }
+        }
+        None
     }
 }
