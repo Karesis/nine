@@ -396,7 +396,11 @@ pub struct FunctionDefinition {
     pub name: Identifier,
     pub params: Vec<Parameter>,
     pub return_type: Option<Type>,
-    pub body: Block, // Block
+    // 修改 1: 允许没有函数体 (Option)
+    // Some(block) -> 定义
+    // None        -> 声明 (extern)
+    pub body: Option<Block>,
+    pub is_variadic: bool,
     pub is_pub: bool,
     pub span: Span,
 }

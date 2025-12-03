@@ -61,11 +61,21 @@ impl<'a> Lexer<'a> {
 
             // 需要向前看一位 (Lookahead) 的符号
             '.' => {
-                // 处理浮点数开头是小数点的情况 (如 .5)，虽然 EBNF 没明确写，但通常支持
-                // 如果 . 后面是数字，且前面是空白/符号，怎么算？
-                // 为简单起见，这里严格遵循 EBNF: Number -> INT | FLOAT，通常 FLOAT 是 0.5
-                // 所以 . 就是 Dot
-                self.make_token(TokenKind::Dot)
+                // 检查是否是 '...'
+                // 我们需要连续 peek 两个字符
+                let mut lookahead = self.chars.clone();
+                let next1 = lookahead.next();
+                let next2 = lookahead.next();
+
+                if let (Some('.'), Some('.')) = (next1, next2) {
+                    // 确实是 '...'，吞噬掉后两个点
+                    self.advance(); // second dot
+                    self.advance(); // third dot
+                    self.make_token(TokenKind::DotDotDot)
+                } else {
+                    // 只是单个点 '.'
+                    self.make_token(TokenKind::Dot)
+                }
             }
 
             ':' => {

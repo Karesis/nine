@@ -17,6 +17,7 @@ pub enum TypeKey {
     Function {
         params: Vec<TypeKey>,
         ret: Option<Box<TypeKey>>,
+        is_variadic: bool
     },
     /// 未定类型的整数字面量
     IntegerLiteral(u64),
@@ -145,6 +146,9 @@ impl Analyzer {
                 // --- 模块 ---
                 ItemKind::ModuleDecl { name, items: sub_items, .. } => {
                     self.define_symbol(name.name.clone(), item.id, name.span);
+                    
+                    // 【新增】给模块名注册类型，这样 math::add 里的 math 才有类型
+                    self.record_type(item.id, TypeKey::Named(item.id));
 
                     if let Some(subs) = sub_items {
                         self.enter_scope(ScopeKind::Module);
@@ -157,19 +161,25 @@ impl Analyzer {
                 // --- 结构体 ---
                 ItemKind::StructDecl(def) => {
                     self.define_symbol(def.name.name.clone(), item.id, def.name.span);
+                    // 【新增】给结构体名注册类型，支持 Struct::new()
+                    self.record_type(item.id, TypeKey::Named(item.id));
+                    
                     self.register_static_methods(item.id, &def.static_methods);
                 }
 
                 // --- 【补全】联合体 ---
                 ItemKind::UnionDecl(def) => {
                     self.define_symbol(def.name.name.clone(), item.id, def.name.span);
+                    // 【新增】
+                    self.record_type(item.id, TypeKey::Named(item.id));
+                    
                     self.register_static_methods(item.id, &def.static_methods);
                 }
 
                 // --- 枚举 ---
                 ItemKind::EnumDecl(def) => {
                     self.define_symbol(def.name.name.clone(), item.id, def.name.span);
-                    
+                    self.record_type(item.id, TypeKey::Named(item.id));
                     let mut enum_scope = Scope::new(ScopeKind::Module);
                     for variant in &def.variants {
                         enum_scope.symbols.insert(variant.name.name.clone(), variant.id);
@@ -332,7 +342,7 @@ impl Analyzer {
             None 
         };
 
-        let ty = TypeKey::Function { params: param_keys, ret: ret_key };
+        let ty = TypeKey::Function { params: param_keys, ret: ret_key, is_variadic: func.is_variadic };
         self.record_type(func.id, ty);
     }
 
@@ -447,7 +457,10 @@ impl Analyzer {
         let prev_ret_type = self.current_return_type.clone();
         self.current_return_type = Some(expected_ret);
 
-        self.check_block(&func.body);
+        // 修改：只有当 body 存在时才检查
+        if let Some(body) = &func.body {
+            self.check_block(body);
+        }
 
         self.current_return_type = prev_ret_type;
         self.exit_scope();
@@ -624,6 +637,13 @@ impl Analyzer {
                 let lhs_ty = self.check_expr(lhs);
                 let rhs_ty = self.check_expr(rhs);
                 self.check_type_match(&lhs_ty, &rhs_ty, expr.span);
+
+                // 2. 【核心修复】尝试双向固化字面量
+                // 如果 lhs 是 i32 变量，rhs 是字面量 50，这里会把 50 固化为 i32
+                self.coerce_literal_type(rhs.id, &lhs_ty, &rhs_ty);
+                // 反之亦然（例如 50 + x）
+                self.coerce_literal_type(lhs.id, &rhs_ty, &lhs_ty);
+
                 match op {
                     BinaryOperator::Equal | BinaryOperator::NotEqual | 
                     BinaryOperator::Less | BinaryOperator::Greater |
@@ -698,17 +718,60 @@ impl Analyzer {
 
             ExpressionKind::Call { callee, arguments } => {
                 let callee_type = self.check_expr(callee);
-                if let TypeKey::Function { params, ret } = callee_type {
-                    if params.len() != arguments.len() {
-                        self.error(format!("Argument count mismatch"), expr.span);
+                
+                // 解构时加上 is_variadic
+                if let TypeKey::Function { params, ret, is_variadic } = callee_type {
+                    
+                    // 1. 检查参数数量
+                    if is_variadic {
+                        if arguments.len() < params.len() {
+                            self.error(format!("Variadic function requires at least {} arguments", params.len()), expr.span);
+                        }
+                    } else {
+                        if params.len() != arguments.len() {
+                            self.error(format!("Argument count mismatch: expected {}, got {}", params.len(), arguments.len()), expr.span);
+                        }
                     }
+
+                    // 2. 检查固定参数的类型
+                    // zip 只会迭代到最短的那一边，所以多出来的变长参数不会进入这个循环
                     for (arg_expr, param_ty) in arguments.iter().zip(params.iter()) {
                         let arg_actual_ty = self.check_expr(arg_expr);
                         self.check_type_match(param_ty, &arg_actual_ty, arg_expr.span);
-                        // 如果参数传的是 10，而函数要 u8，记录下来
                         self.coerce_literal_type(arg_expr.id, param_ty, &arg_actual_ty);
                     }
+
+                    // 3. 处理变长参数 (Varargs)
+                    // 对于多出来的参数，我们也需要 check_expr 以便计算它们的类型（否则 Codegen 查表会 panic）
+                    if arguments.len() > params.len() {
+                        for arg_expr in &arguments[params.len()..] {
+                            let arg_ty = self.check_expr(arg_expr);
+                            
+                            // 这里有一个关键点：C 语言的变长参数有“默认提升规则” (Default Argument Promotions)
+                            // float -> double
+                            // char/short -> int
+                            // 我们可以简单地针对字面量做一个默认回写，防止 Codegen 瞎猜 i64
+                            
+                            // 策略：如果是整数字面量，且没被约束，默认回写为 i32 (符合 C 的 int 提升)
+                            if let TypeKey::IntegerLiteral(val) = arg_ty {
+                                // 检查大小：如果超过 u32::MAX，说明必须用 i64
+                                // 否则默认提升为 i32 (符合 C ABI)
+                                let target_type = if val > u32::MAX as u64 {
+                                    TypeKey::Primitive(PrimitiveType::I64)
+                                } else {
+                                    TypeKey::Primitive(PrimitiveType::I32)
+                                };
+                                self.coerce_literal_type(arg_expr.id, &target_type, &arg_ty);
+                            }
+                            // 如果是浮点字面量，默认回写为 f64 (double)
+                            if let TypeKey::FloatLiteral(_) = arg_ty {
+                                self.coerce_literal_type(arg_expr.id, &TypeKey::Primitive(PrimitiveType::F64), &arg_ty);
+                            }
+                        }
+                    }
+
                     if let Some(ret_ty) = ret { *ret_ty } else { TypeKey::Primitive(PrimitiveType::Unit) }
+                
                 } else {
                     if !matches!(callee_type, TypeKey::Error) {
                         self.error("Expected function type", callee.span);
@@ -726,7 +789,7 @@ impl Analyzer {
                 } else { None };
 
                 if let Some(info) = method_info {
-                    if let Some(TypeKey::Function { params, ret }) = self.ctx.types.get(&info.def_id).cloned() {
+                    if let Some(TypeKey::Function { params, ret, .. }) = self.ctx.types.get(&info.def_id).cloned() {
                         let expected_args = if params.is_empty() { &[] } else { &params[1..] };
                         if expected_args.len() != arguments.len() {
                              self.error(format!("Method argument count mismatch"), expr.span);
@@ -745,11 +808,93 @@ impl Analyzer {
                 }
             },
 
+            ExpressionKind::Index { target, index } => {
+                // 1. 递归检查目标（数组）
+                let target_ty = self.check_expr(target);
+                
+                // 2. 递归检查索引（必须是整数）
+                let index_ty = self.check_expr(index);
+                
+                // 检查索引是否为整数类型
+                let is_index_valid = match &index_ty {
+                    TypeKey::Primitive(p) => self.is_integer_type(p),
+                    TypeKey::IntegerLiteral(_) => true,
+                    _ => false,
+                };
+
+                if !is_index_valid {
+                    self.error("Array index must be an integer", index.span);
+                } else {
+                    // 固化索引字面量类型 (建议统一固化为 i64 或 usize，为了方便 Codegen，这里选 i64)
+                    self.coerce_literal_type(index.id, &TypeKey::Primitive(PrimitiveType::I64), &index_ty);
+                }
+
+                // 3. 核心：检查 Target 类型并解包
+                match target_ty {
+                    TypeKey::Array(inner, _size) => {
+                        // 如果是数组 [T; N]，索引操作的结果类型就是 T
+                        *inner
+                    }
+                    
+                    TypeKey::Pointer(_, _) => {
+                        // 【严格检查】禁止指针使用 []
+                        self.error("Cannot index a pointer with '[]'. Pointers and Arrays are distinct in 9-lang.", target.span);
+                        TypeKey::Error
+                    }
+                    
+                    TypeKey::Error => TypeKey::Error, // 级联错误，忽略
+                    
+                    _ => {
+                        self.error(format!("Type {:?} cannot be indexed", target_ty), target.span);
+                        TypeKey::Error
+                    }
+                }
+            },
+
+            ExpressionKind::StaticAccess { target, member } => {
+                // 1. 检查 Target 类型 (Struct Name 或 Enum Name)
+                let target_ty = self.check_expr(target); // 这应该返回 TypeKey::Named(def_id)
+                
+                if let TypeKey::Named(container_id) = target_ty {
+                    // 2. 在 container (struct/enum) 的命名空间里查找 member
+                    if let Some(scope) = self.ctx.namespace_scopes.get(&container_id) {
+                        if let Some(&def_id) = scope.symbols.get(&member.name) {
+                            // 找到了！(可能是静态方法，也可能是 Enum Variant)
+                            
+                            // 记录解析结果，供 Codegen 使用
+                            self.ctx.path_resolutions.insert(expr.id, def_id);
+                            
+                            // 返回类型
+                            if let Some(ty) = self.get_type_of_def(def_id) {
+                                // 如果是 Enum Variant，之前已经有逻辑处理为 IntegerLiteral
+                                // 这里我们主要关注 Function
+                                self.record_type(expr.id, ty.clone());
+                                return ty;
+                            }
+                        }
+                    }
+                }
+                
+                // Fallback 到之前的 Enum IntegerLiteral 逻辑 (如果有)
+                // ...
+                TypeKey::Error
+            },
+
             // --- 【补全】一元运算 ---
-             ExpressionKind::Unary { op, operand } => {
+            ExpressionKind::Unary { op, operand } => {
                 let inner = self.check_expr(operand);
                 match op {
-                    UnaryOperator::AddressOf => TypeKey::Pointer(Box::new(inner), Mutability::Constant),
+                    UnaryOperator::AddressOf => {
+                        // 1. 获取操作数的可变性
+                        // 注意：此时 operand 已经被 check_expr 递归处理过，
+                        // 所以 Path Resolution 和 Type Info 都已经就绪。
+                        let mutability = self.get_expr_mutability(operand);
+                        
+                        // 2. 生成对应的指针类型
+                        // 如果 operand 是 mut，生成 *T (Mutable)
+                        // 否则生成 ^T (Constant)
+                        TypeKey::Pointer(Box::new(inner), mutability)
+                    }
                     UnaryOperator::Dereference => {
                         if let TypeKey::Pointer(base, _) = inner { *base } 
                         else { self.error("Cannot deref non-pointer", expr.span); TypeKey::Error }
@@ -801,11 +946,26 @@ impl Analyzer {
                 }
             },
             
-            ExpressionKind::Cast { expr: _, target_type } => {
-                self.resolve_ast_type(target_type)
+            ExpressionKind::Cast { expr: src_expr, target_type } => {
+                // 1. 解析目标类型 (T)
+                let target_ty = self.resolve_ast_type(target_type);
+
+                // 2. 【关键修复】递归检查源表达式 (val)
+                // 这会触发 Path 解析，填充 path_resolutions 和 types 表
+                let src_ty = self.check_expr(src_expr);
+
+                // 3. (可选) 检查 Cast 是否合法
+                // 例如：禁止 Struct 转 Int，或者做一些基础检查
+                // 目前为了跑通，我们先假设用户是对的 (Trust the programmer for now)
+                
+                // 4. (可选优化) 固化字面量
+                // 如果是 10 as u8，我们可以顺手把 10 固化为 u8，减少 Codegen 的 cast 指令
+                // 但 LLVM 优化器也会做这件事，所以这步不是必须的。
+                // self.coerce_literal_type(src_expr.id, &target_ty, &src_ty);
+
+                // Cast 表达式的类型就是目标类型
+                target_ty
             },
-            
-            _ => TypeKey::Error, 
         };
 
         self.record_type(expr.id, ty.clone());
@@ -876,6 +1036,47 @@ impl Analyzer {
         }
     }
 
+    // 辅助：判断一个表达式是否是可变的 (Mutable L-Value)
+    // 用于决定取地址 (&) 操作生成的是 *T 还是 ^T
+    fn get_expr_mutability(&self, expr: &Expression) -> Mutability {
+        match &expr.kind {
+            // 1. 变量：查表看定义时是不是 mut
+            ExpressionKind::Path(path) => {
+                if let Some(&def_id) = self.ctx.path_resolutions.get(&path.id) {
+                    // 如果表里没记录（比如全局变量暂未处理），默认不可变，安全第一
+                    *self.ctx.mutabilities.get(&def_id).unwrap_or(&Mutability::Immutable)
+                } else {
+                    Mutability::Immutable
+                }
+            }
+
+            // 2. 字段访问 (obj.field)：取决于 obj 是否可变
+            ExpressionKind::FieldAccess { receiver, .. } => {
+                self.get_expr_mutability(receiver)
+            }
+
+            // 3. 数组索引 (arr[i])：取决于 arr 是否可变
+            ExpressionKind::Index { target, .. } => {
+                self.get_expr_mutability(target)
+            }
+
+            // 4. 解引用 (ptr^)：取决于 ptr 本身是指向可变还是不可变
+            // 注意：这里逻辑有点绕。
+            // 如果 ptr 是 *T (Mutable Pointer)，那么 ptr^ 是可变的。
+            // 如果 ptr 是 ^T (Const Pointer)，那么 ptr^ 是不可变的。
+            ExpressionKind::Unary { op: UnaryOperator::Dereference, operand } => {
+                if let Some(TypeKey::Pointer(_, mutability)) = self.ctx.types.get(&operand.id) {
+                    *mutability
+                } else {
+                    Mutability::Immutable
+                }
+            }
+
+            // 其他情况（字面量、函数调用返回值等）都是右值，不可变
+            _ => Mutability::Immutable,
+        }
+    }
+
     // 检查是否为数值类型 (整数 或 浮点数)
     fn is_numeric_type(&self, p: &PrimitiveType) -> bool {
         use PrimitiveType::*;
@@ -936,7 +1137,7 @@ impl Analyzer {
             TypeKind::Function { params, ret_type } => {
                 let p = params.iter().map(|t| self.resolve_ast_type(t)).collect();
                 let r = ret_type.as_ref().map(|t| Box::new(self.resolve_ast_type(t)));
-                TypeKey::Function { params: p, ret: r }
+                TypeKey::Function { params: p, ret: r, is_variadic: false}
             }
         }
     }

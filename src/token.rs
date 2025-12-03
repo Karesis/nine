@@ -167,6 +167,7 @@ define_tokens! {
         "::" => ColonColon,
         ":"  => Colon,
         "->" => Arrow,
-        "|"  => Pipe        // 用于 switch case 模式多选
+        "|"  => Pipe,        // 用于 switch case 模式多选
+        "..." => DotDotDot, // ...
     }
 }

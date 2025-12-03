@@ -217,7 +217,20 @@ impl<'a> Parser<'a> {
 
     /// 获取 Token 对应的源码文本
     pub fn text(&self, token: Token) -> &'a str {
-        token.text(self.source)
+        // 修正：Token 的 span 是全局偏移量 (包含 base_offset)
+        // self.source 是当前文件的局部源码 (从 0 开始)
+        // 所以必须减去 base_offset 才能正确切片
+        let offset = self.stream.base_offset;
+        
+        // 安全检查（可选，但推荐用于调试）
+        if token.span.start < offset {
+            panic!("Token start {} is smaller than base offset {}", token.span.start, offset);
+        }
+        
+        let local_start = token.span.start - offset;
+        let local_end = token.span.end - offset;
+        
+        &self.source[local_start..local_end]
     }
 
     /// 核心辅助函数：分配下一个 ID
@@ -225,6 +238,38 @@ impl<'a> Parser<'a> {
         let id = self.node_id_counter;
         self.node_id_counter += 1;
         NodeId(id)
+    }
+
+    // 辅助：处理字符串转义
+    fn unescape_string(&self, raw: &str) -> String {
+        let mut result = String::new();
+        let mut chars = raw.chars();
+        
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('n') => result.push('\n'),
+                    Some('r') => result.push('\r'),
+                    Some('t') => result.push('\t'),
+                    Some('\\') => result.push('\\'),
+                    Some('"') => result.push('"'),
+                    Some('0') => result.push('\0'),
+                    // 可以根据需要支持更多，如 \xHH hex
+                    Some(other) => {
+                        // 未知转义，保留原样或报错
+                        result.push('\\');
+                        result.push(other);
+                    }
+                    None => {
+                        // 结尾是 \，忽略
+                        break;
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
     }
 
 }
@@ -877,13 +922,28 @@ impl<'a> Parser<'a> {
                 Ok(Literal::Float(val))
             },
             TokenKind::StringLit => {
-                // 去掉引号
+                // text 是包含引号的原始文本，例如 "hello\n"
+                // 1. 去掉首尾引号
                 let content = &text[1..text.len()-1]; 
-                Ok(Literal::String(content.to_string()))
+                // 2. 进行转义处理
+                let unescaped = self.unescape_string(content);
+                // 3. 存入 AST
+                Ok(Literal::String(unescaped))
             },
             TokenKind::CharLit => {
-                let content = text.chars().nth(1).unwrap_or('\0');
-                Ok(Literal::Char(content))
+                // 1. 去掉首尾的单引号 '...'
+                let content = &text[1..text.len()-1];
+                
+                // 2. 直接调用刚才写的字符串反转义函数！
+                // 它能完美处理 \n, \t, \\ 等所有情况
+                // 比如输入文本是 `\n` (两个字符)，它会返回包含一个换行符的 String
+                let unescaped_str = self.unescape_string(content);
+                
+                // 3. 取出第一个字符
+                // 如果是空字符 '' (虽然lexer应该拦截了)，给个 \0
+                let c = unescaped_str.chars().next().unwrap_or('\0');
+                
+                Ok(Literal::Char(c))
             },
             _ => unreachable!(),
         }
@@ -1618,8 +1678,8 @@ impl<'a> Parser<'a> {
         
         self.expect(TokenKind::LParen)?;
         
-        // 传递上下文类型给参数列表解析器
-        let params = self.parse_param_list(ctx_type)?;
+        // 修改：接收 is_variadic
+        let (params, is_variadic) = self.parse_param_list(ctx_type)?;
         
         self.expect(TokenKind::RParen)?;
         
@@ -1628,76 +1688,86 @@ impl<'a> Parser<'a> {
             return_type = Some(self.parse_type()?);
         }
         
-        let body = self.parse_block()?; 
-        let body_span_end = body.span.end;
+        // 修改：解析 Body (Block) 或者 声明 (Semi)
+        let (body, end_pos) = if self.check(TokenKind::LBrace) {
+            // 情况 A: 有函数体 fn foo() { ... }
+            let block = self.parse_block()?;
+            let end = block.span.end;
+            (Some(block), end)
+        } else if self.match_token(&[TokenKind::Semi]) {
+            // 情况 B: 外部声明 fn foo();
+            (None, self.previous_span().end)
+        } else {
+            return Err(ParseError {
+                expected: "{ or ;".into(),
+                found: self.peek().kind,
+                span: self.peek().span,
+                message: "Expected function body or semicolon for declaration".into()
+            });
+        };
 
         Ok(FunctionDefinition {
             id: self.next_id(),
             name,
             params,
             return_type,
-            body,
+            body,          // Option<Block>
+            is_variadic,   // bool (记得在 AST 结构体里加上这个字段!)
             is_pub,
-            span: Span::new(start, body_span_end),
+            span: Span::new(start, end_pos),
         })
     }
 
-    /// 解析参数列表 (Param | SelfParam)
+    /// 解析参数列表 (Param | SelfParam | VarArgs)
     /// ctx_type: Some(Type) 表示允许 self 且类型为 Type；None 表示不允许 self。
-    fn parse_param_list(&mut self, ctx_type: Option<&Type>) -> ParseResult<Vec<Parameter>> {
+    /// 返回值: (参数列表, 是否是变长参数)
+    fn parse_param_list(&mut self, ctx_type: Option<&Type>) -> ParseResult<(Vec<Parameter>, bool)> {
         let mut params = Vec::new();
+        let mut is_variadic = false;
+
         if self.check(TokenKind::RParen) {
-            return Ok(params);
+            return Ok((params, false));
         }
 
         loop {
-            // 检查 self
+            // 1. 检查变长参数 "..." (DotDotDot)
+            // 变长参数必须放在最后，所以解析到它就标记并退出循环
+            if self.match_token(&[TokenKind::DotDotDot]) {
+                is_variadic = true;
+                // "..." 后面不能再有参数了，直接结束
+                break;
+            }
+
+            // 2. 检查 self (保持原有逻辑)
             let is_self_start = self.check(TokenKind::SelfVal) || 
                                 ((self.check(TokenKind::Mut) || self.check(TokenKind::Const)) && self.check_nth(1, TokenKind::SelfVal));
 
             if is_self_start {
-                // 1. 检查是否允许 self (通过 ctx_type 是否为 Some)
-                let target_type = if let Some(ty) = ctx_type {
-                    ty
-                } else {
-                    return Err(ParseError { 
-                        expected: "Parameter".into(), 
-                        found: TokenKind::SelfVal, 
-                        span: self.peek().span, 
-                        message: "self parameter is only allowed in 'imp' blocks".into() 
-                    });
+                // ... (原有 self 解析逻辑保持不变) ...
+                let target_type = if let Some(ty) = ctx_type { ty } else {
+                    return Err(ParseError { expected: "Parameter".into(), found: TokenKind::SelfVal, span: self.peek().span, message: "self only allowed in imp".into() });
                 };
-
                 if !params.is_empty() {
-                    return Err(ParseError { 
-                        expected: "Parameter".into(), 
-                        found: TokenKind::SelfVal, 
-                        span: self.peek().span, 
-                        message: "self must be the first parameter".into() 
-                    });
+                    return Err(ParseError { expected: "Parameter".into(), found: TokenKind::SelfVal, span: self.peek().span, message: "self must be first".into() });
                 }
-
-                // 2. 解析修饰符
+                
                 let mut modifier = Mutability::Immutable;
                 if self.match_token(&[TokenKind::Mut]) { modifier = Mutability::Mutable; }
                 else if self.match_token(&[TokenKind::Const]) { modifier = Mutability::Constant; }
                 
                 let self_tok = self.expect(TokenKind::SelfVal)?;
-                
-                // 3. 【核心修改】直接 Clone 传入的类型！
-                // 这样 AST 里的 self 参数就直接拥有了正确的类型（如 Point, *Point）
                 let real_type = target_type.clone(); 
 
                 params.push(Parameter {
                     id: self.next_id(),
                     name: Identifier { name: "self".into(), span: self_tok.span },
-                    ty: real_type, // <--- 注入真实类型
+                    ty: real_type,
                     is_mutable: modifier == Mutability::Mutable,
                     is_self: true,
                 });
 
             } else {
-                // 普通参数解析保持不变
+                // 3. 普通参数解析 (保持原有逻辑)
                 let mut modifier = Mutability::Immutable;
                  if self.match_token(&[TokenKind::Mut]) { modifier = Mutability::Mutable; }
                 else if self.match_token(&[TokenKind::Const]) { modifier = Mutability::Constant; }
@@ -1715,11 +1785,13 @@ impl<'a> Parser<'a> {
                 });
             }
 
+            // 4. 检查逗号
             if !self.match_token(&[TokenKind::Comma]) {
                 break;
             }
         }
-        Ok(params)
+        
+        Ok((params, is_variadic))
     }
     
     // 辅助: parse_identifier (之前可能还没写，这里补上)

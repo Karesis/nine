@@ -137,7 +137,22 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     for m in methods { self.compile_function(m).ok(); }
                 }
                 ItemKind::ModuleDecl { items: Some(subs), .. } => self.compile_items(subs),
-                // Struct/Enum static methods support can be added here
+                // === 新增：编译结构体静态方法 ===
+                ItemKind::StructDecl(def) => {
+                    for m in &def.static_methods {
+                        if let Err(e) = self.compile_function(m) {
+                            println!("Codegen Error in static method {}::{}: {}", def.name.name, m.name.name, e);
+                        }
+                    }
+                }
+                // === 新增：编译枚举静态方法 ===
+                ItemKind::EnumDecl(def) => {
+                    for m in &def.static_methods {
+                        if let Err(e) = self.compile_function(m) {
+                            println!("Codegen Error in static method {}::{}: {}", def.name.name, m.name.name, e);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -205,6 +220,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 ItemKind::Implementation { methods, .. } => {
                     for m in methods { self.declare_function(m); }
                 }
+                ItemKind::StructDecl(def) => {
+                    for m in &def.static_methods { self.declare_function(m); }
+                }
+                ItemKind::EnumDecl(def) => {
+                    for m in &def.static_methods { self.declare_function(m); }
+                }
                 ItemKind::ModuleDecl { items: Some(subs), .. } => self.register_function_prototypes(subs),
                 _ => {}
             }
@@ -217,18 +238,19 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             self.compile_type(key).unwrap().into()
         }).collect::<Vec<_>>();
 
-        // 处理返回值：Unit -> Void Type (LLVM fn signature), others -> BasicType
-        let ret_key = self.analyzer.types.get(&func.id).unwrap(); // Function TypeKey
+        let ret_key = self.analyzer.types.get(&func.id).unwrap();
+        
+        // 解析 FunctionType
+        // 注意：fn_type 的第二个参数是 is_var_args
         let fn_type = if let TypeKey::Function { ret: Some(r), .. } = ret_key {
              if let TypeKey::Primitive(PrimitiveType::Unit) = **r {
-                 self.context.void_type().fn_type(&param_types, false)
+                 self.context.void_type().fn_type(&param_types, func.is_variadic) // <--- Use AST flag
              } else {
                  let ret_ty = self.compile_type(r).unwrap();
-                 ret_ty.fn_type(&param_types, false)
+                 ret_ty.fn_type(&param_types, func.is_variadic) // <--- Use AST flag
              }
         } else {
-            // 默认 Void
-             self.context.void_type().fn_type(&param_types, false)
+             self.context.void_type().fn_type(&param_types, func.is_variadic) // <--- Use AST flag
         };
 
         let val = self.module.add_function(&func.name.name, fn_type, None);
@@ -236,13 +258,22 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     }
 
     pub fn compile_function(&mut self, func: &FunctionDefinition) -> Result<(), String> {
+        // 1. 如果没有 body，说明是 extern 声明，直接跳过编译
+        if func.body.is_none() {
+            return Ok(());
+        }
+        
+        // 既然上面检查过了，这里我们可以安全地取出 Block 的引用
+        // 使用 as_ref() 把 &Option<Block> 变成 Option<&Block>，然后 unwrap
+        let body_ref = func.body.as_ref().unwrap();
+
         let function = *self.functions.get(&func.id).ok_or("Proto missing")?;
         self.current_fn = Some(function);
 
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
-        // OS开发惯例：所有参数 Alloca 进栈，变为局部变量
+        // 处理参数：Alloca + Store
         for (i, param) in func.params.iter().enumerate() {
             let arg_val = function.get_nth_param(i as u32).unwrap();
             arg_val.set_name(&param.name.name);
@@ -256,19 +287,18 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             self.variables.insert(param.id, alloca);
         }
 
-        self.compile_block(&func.body)?;
+        // 2. 【修正点一】传入解包后的引用
+        self.compile_block(body_ref)?;
 
-        // 补全 Void Return
-        if !self.block_terminated(&func.body) {
+        // 3. 【修正点二】传入解包后的引用
+        if !self.block_terminated(body_ref) {
             if func.return_type.is_none() {
                 self.builder.build_return(None).ok();
             } else {
-                // Analyzer 应该保证了有返回值，但如果是死代码路径可能走到这里
-                // self.builder.build_unreachable(); 
+                unreachable!();
             }
         }
         
-        // function.verify(true); // Optional verify
         Ok(())
     }
 
@@ -852,6 +882,17 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             }
         }
 
+        // === Case B: 静态方法调用 (Struct::method) ===
+        if let ExpressionKind::StaticAccess { target: _, member } = &callee.kind {
+            if let Some(def_id) = self.analyzer.path_resolutions.get(&callee.id) {
+                 if let Some(fn_val) = self.functions.get(def_id) {
+                    let call_site = self.builder.build_call(*fn_val, &compiled_args, "static_call")
+                        .map_err(|_| "Static call failed")?;
+                    return self.handle_call_return(call_site);
+                }
+            }
+        }
+
         // 3. “间接调用” (Indirect Call) - 函数指针
         // 如果走到这里，说明 callee 是一个表达式（比如变量、数组元素、返回函数指针的函数调用等）
         
@@ -888,9 +929,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     // --- 辅助函数 2: 提取函数签名 ---
     // 这个函数专门用于间接调用，因为 compile_type 把函数转成了 ptr，我们需要还原出 FunctionType
+    // src/codegen.rs
+
     fn compile_function_type_signature(&self, key: &TypeKey) -> Result<FunctionType<'ctx>, String> {
         match key {
-            TypeKey::Function { params, ret } => {
+            // 解构加上 is_variadic
+            TypeKey::Function { params, ret, is_variadic } => {
                 // 1. 转换参数类型
                 let mut param_types = Vec::new();
                 for param in params {
@@ -898,22 +942,19 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     param_types.push(llvm_ty.into());
                 }
 
-                // 2. 转换返回值类型
+                // 2. 转换返回值类型，并传入 is_variadic
                 if let Some(ret_key) = ret {
-                    // 特殊处理 Unit -> Void
                     if let TypeKey::Primitive(PrimitiveType::Unit) = **ret_key {
-                        Ok(self.context.void_type().fn_type(&param_types, false))
+                        Ok(self.context.void_type().fn_type(&param_types, *is_variadic)) // <--- Use it
                     } else {
                         let ret_llvm_ty = self.compile_type(ret_key).ok_or("Failed to compile ret type")?;
-                        Ok(ret_llvm_ty.fn_type(&param_types, false))
+                        Ok(ret_llvm_ty.fn_type(&param_types, *is_variadic)) // <--- Use it
                     }
                 } else {
-                    // None 也是 Void
-                    Ok(self.context.void_type().fn_type(&param_types, false))
+                    Ok(self.context.void_type().fn_type(&param_types, *is_variadic)) // <--- Use it
                 }
             },
             
-            // 如果类型系统把函数指针表示为 Pointer(Function)，我们需要解包
             TypeKey::Pointer(inner, _) => self.compile_function_type_signature(inner),
             
             _ => Err(format!("Expected function type for indirect call, got {:?}", key)),
