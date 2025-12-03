@@ -718,7 +718,6 @@ impl Analyzer {
 
             ExpressionKind::Call { callee, arguments } => {
                 let callee_type = self.check_expr(callee);
-                
                 // 解构时加上 is_variadic
                 if let TypeKey::Function { params, ret, is_variadic } = callee_type {
                     
@@ -854,12 +853,13 @@ impl Analyzer {
             ExpressionKind::StaticAccess { target, member } => {
                 // 1. 检查 Target 类型 (Struct Name 或 Enum Name)
                 let target_ty = self.check_expr(target); // 这应该返回 TypeKey::Named(def_id)
-                
                 if let TypeKey::Named(container_id) = target_ty {
                     // 2. 在 container (struct/enum) 的命名空间里查找 member
                     if let Some(scope) = self.ctx.namespace_scopes.get(&container_id) {
+                        
                         if let Some(&def_id) = scope.symbols.get(&member.name) {
                             // 找到了！(可能是静态方法，也可能是 Enum Variant)
+                            let found_type = self.get_type_of_def(def_id);
                             
                             // 记录解析结果，供 Codegen 使用
                             self.ctx.path_resolutions.insert(expr.id, def_id);
@@ -874,7 +874,6 @@ impl Analyzer {
                         }
                     }
                 }
-                
                 // Fallback 到之前的 Enum IntegerLiteral 逻辑 (如果有)
                 // ...
                 TypeKey::Error

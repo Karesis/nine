@@ -84,19 +84,17 @@ pub struct Parser<'a> {
     pub errors: Vec<ParseError>,
     // 专门用于错误恢复：记录上一个被 consume 的 token 类型
     previous_kind: TokenKind,
-    node_id_counter: u32,
+    node_id_counter: &'a mut u32,
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(source: &'a str, lexer: Lexer<'a>, base_offset: usize) -> Self {
+    pub fn new(source: &'a str, lexer: Lexer<'a>, base_offset: usize, id_counter: &'a mut u32) -> Self {
         Self {
             source,
             stream: TokenStream::new(lexer, base_offset),
             errors: Vec::new(),
-            // 初始化为 EOF，表示“还没有任何历史”
-            // 只要不是 TokenKind::Semi 就可以，EOF 是最无害的
             previous_kind: TokenKind::EOF,
-            node_id_counter: 0,
+            node_id_counter: id_counter, // 绑定引用
         }
     }
 
@@ -235,8 +233,8 @@ impl<'a> Parser<'a> {
 
     /// 核心辅助函数：分配下一个 ID
     fn next_id(&mut self) -> NodeId {
-        let id = self.node_id_counter;
-        self.node_id_counter += 1;
+        let id = *self.node_id_counter;
+        *self.node_id_counter += 1;
         NodeId(id)
     }
 

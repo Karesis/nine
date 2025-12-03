@@ -7,11 +7,12 @@ use crate::ast::{ItemKind, Program, Item};
 
 pub struct Driver {
     pub source_manager: SourceManager,
+    pub global_node_id: u32,
 }
 
 impl Driver {
     pub fn new() -> Self {
-        Self { source_manager: SourceManager::new() }
+        Self { source_manager: SourceManager::new(), global_node_id: 0,}
     }
 
     /// 入口：编译项目
@@ -36,7 +37,7 @@ impl Driver {
         
         // 2. Parse
         let lexer = Lexer::new(&src);
-        let mut parser = Parser::new(&src, lexer, base_offset);
+        let mut parser = Parser::new(&src, lexer, base_offset, &mut self.global_node_id);
         let mut program = parser.parse_program();
 
         if !parser.errors.is_empty() {
