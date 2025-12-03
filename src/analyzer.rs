@@ -471,6 +471,7 @@ impl Analyzer {
                     // 有初始化：检查类型是否匹配
                     let init_type = self.check_expr(init_expr);
                     self.check_type_match(&declared_type, &init_type, init_expr.span);
+                    self.coerce_literal_type(init_expr.id, &declared_type, &init_type);
                 } else {
                     // 没有初始化：检查修饰符是否允许
                     match modifier {
@@ -503,7 +504,10 @@ impl Analyzer {
                 // 1. 类型匹配
                 self.check_type_match(&lhs_ty, &rhs_ty, stmt.span);
                 
-                // 2. 【新增】L-Value 可变性检查
+                // 如果 rhs 是字面量，告诉它具体的类型
+                self.coerce_literal_type(rhs.id, &lhs_ty, &rhs_ty);
+
+                // 2. L-Value 可变性检查
                 self.check_lvalue_mutability(lhs);
             }
             
@@ -531,6 +535,7 @@ impl Analyzer {
                             } else {
                                 let actual = self.check_expr(expr);
                                 self.check_type_match(&expected, &actual, expr.span);
+                                self.coerce_literal_type(expr.id, &expected, &actual);
                             }
                         }
                         None => {
@@ -570,6 +575,7 @@ impl Analyzer {
                     for pattern in &case.patterns {
                         let pattern_ty = self.check_expr(pattern);
                         self.check_type_match(&target_ty, &pattern_ty, pattern.span);
+                        self.coerce_literal_type(pattern.id, &target_ty, &pattern_ty);
                     }
                     self.check_block(&case.body);
                 }
@@ -630,30 +636,39 @@ impl Analyzer {
 
             ExpressionKind::StructLiteral { type_name, fields } => {
                 if let Some(def_id) = self.resolve_path(type_name) {
-                    let mut initialized_fields = Vec::new();
+                    
+                    // --- 修改开始：直接在一个循环里完成所有逻辑 ---
                     for init in fields {
+                        // 1. 先算出实际给的值是什么类型 (例如 IntegerLiteral(10))
                         let actual_ty = self.check_expr(&init.value);
-                        initialized_fields.push((&init.field_name, actual_ty, init.value.span));
-                    }
-
-                    for (field_ident, actual_ty, span) in initialized_fields {
-                        let field_name = &field_ident.name;
+                        
+                        // 2. 查找结构体定义中这个字段期望的类型 (例如 u8)
+                        let field_name = &init.field_name.name;
                         let expected_ty_opt = self.ctx.struct_fields
                             .get(&def_id)
-                            .and_then(|fields| fields.get(field_name))
+                            .and_then(|fs| fs.get(field_name))
                             .cloned();
 
+                        // 3. 检查匹配 + 回写类型
                         if let Some(expected_ty) = expected_ty_opt {
-                            self.check_type_match(&expected_ty, &actual_ty, span);
+                            // 检查类型是否兼容
+                            self.check_type_match(&expected_ty, &actual_ty, init.value.span);
+                            self.coerce_literal_type(init.value.id, &expected_ty, &actual_ty);
+
                         } else {
+                            // 错误处理逻辑保持不变
                             if self.ctx.struct_fields.contains_key(&def_id) {
-                                self.error(format!("Struct has no field named '{}'", field_name), field_ident.span);
+                                self.error(format!("Struct has no field named '{}'", field_name), init.field_name.span);
                             } else {
                                 self.error("Not a struct definition", type_name.span);
+                                // 这里 return Error 会导致后续字段不检查，或者 break 也可以
+                                // 为了简单，这里直接返回 Error 结束整个结构体的检查
                                 return TypeKey::Error; 
                             }
                         }
                     }
+                    // --- 修改结束 ---
+
                     TypeKey::Named(def_id)
                 } else {
                     self.error("Unknown struct type", type_name.span);
@@ -690,6 +705,8 @@ impl Analyzer {
                     for (arg_expr, param_ty) in arguments.iter().zip(params.iter()) {
                         let arg_actual_ty = self.check_expr(arg_expr);
                         self.check_type_match(param_ty, &arg_actual_ty, arg_expr.span);
+                        // 如果参数传的是 10，而函数要 u8，记录下来
+                        self.coerce_literal_type(arg_expr.id, param_ty, &arg_actual_ty);
                     }
                     if let Some(ret_ty) = ret { *ret_ty } else { TypeKey::Primitive(PrimitiveType::Unit) }
                 } else {
@@ -717,6 +734,8 @@ impl Analyzer {
                         for (arg_expr, param_ty) in arguments.iter().zip(expected_args.iter()) {
                             let arg_actual = self.check_expr(arg_expr);
                             self.check_type_match(param_ty, &arg_actual, arg_expr.span);
+                            // 固化方法参数的字面量类型
+                            self.coerce_literal_type(arg_expr.id, param_ty, &arg_actual);
                         }
                         if let Some(r) = ret { *r } else { TypeKey::Primitive(PrimitiveType::Unit) }
                     } else { TypeKey::Error }
@@ -877,6 +896,22 @@ impl Analyzer {
             // 浮点数 (天然有符号)
             F32 | F64
         )
+    }
+
+    // 辅助：类型强转回写
+    // 当我们发现一个“未定类型的字面量”成功匹配了一个“具体类型”时，
+    // 我们把这个具体类型更新到 AST 节点的类型表中，供 Codegen 使用。
+    fn coerce_literal_type(&mut self, node_id: NodeId, expected: &TypeKey, actual: &TypeKey) {
+        match actual {
+            TypeKey::IntegerLiteral(_) | TypeKey::FloatLiteral(_) => {
+                // 只有当期望的是具体的基础类型时（例如 u8, i32），我们才进行固化
+                if let TypeKey::Primitive(_) = expected {
+                    // 【覆盖旧记录】把 IntegerLiteral(...) 覆盖为 Primitive(...)
+                    self.ctx.types.insert(node_id, expected.clone());
+                }
+            }
+            _ => {}
+        }
     }
 
     fn resolve_ast_type(&mut self, ty: &Type) -> TypeKey {
