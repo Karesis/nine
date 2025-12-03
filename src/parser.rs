@@ -21,31 +21,37 @@ struct TokenStream<'a> {
     buffer: VecDeque<Token>,
     /// 记录上一个被消费的 Token 的 Span (用于 EOF 时的报错定位)
     last_span: Span,
+    base_offset: usize,
 }
 
 impl<'a> TokenStream<'a> {
-    fn new(lexer: Lexer<'a>) -> Self {
+    fn new(lexer: Lexer<'a>, base_offset: usize) -> Self {
         Self {
             lexer,
             buffer: VecDeque::new(),
             // 初始 span，可以是 0..0
             last_span: Span::new(0, 0), 
+            base_offset
         }
     }
 
     /// 核心：确保缓冲区里至少有 n+1 个 Token (用于 peek(n))
     fn fill(&mut self, n: usize) {
         while self.buffer.len() <= n {
-            let tok = self.lexer.next_token();
+            let mut tok = self.lexer.next_token();
             
-            // 无论是正常的 Token，还是 ERROR，还是 EOF，统统放进缓冲区。
-            // Parser 会在 consume/expect 时处理它们。
-            self.buffer.push_back(tok);
-
-            if tok.kind == TokenKind::EOF {
-                // EOF 也要放进去之后再 break，这样 buffer 尾部才会有 EOF 哨兵
-                break;
+            // 【在这里统一修正】入队前就改好
+            if tok.kind != TokenKind::EOF {
+                tok.span.start += self.base_offset;
+                tok.span.end += self.base_offset;
+            } else {
+                // EOF 位置通常是 local len，也加上 base
+                tok.span.start += self.base_offset;
+                tok.span.end += self.base_offset;
             }
+
+            self.buffer.push_back(tok);
+            if tok.kind == TokenKind::EOF { break; }
         }
     }
 
@@ -82,10 +88,10 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(source: &'a str, lexer: Lexer<'a>) -> Self {
+    pub fn new(source: &'a str, lexer: Lexer<'a>, base_offset: usize) -> Self {
         Self {
             source,
-            stream: TokenStream::new(lexer),
+            stream: TokenStream::new(lexer, base_offset),
             errors: Vec::new(),
             // 初始化为 EOF，表示“还没有任何历史”
             // 只要不是 TokenKind::Semi 就可以，EOF 是最无害的
@@ -256,6 +262,7 @@ impl<'a> Parser<'a> {
         };
 
         Ok(Type {
+            id: self.next_id(),
             kind: TypeKind::Pointer {
                 inner: Box::new(inner_type),
                 mutability,
@@ -291,6 +298,7 @@ impl<'a> Parser<'a> {
             // 例如 i32[10] -> Array(inner: i32, size: 10)
             let new_span = Span::new(ty.span.start, end_token.span.end);
             ty = Type {
+                id: self.next_id(),
                 kind: TypeKind::Array {
                     inner: Box::new(ty),
                     size,
@@ -316,6 +324,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let prim = self.token_kind_to_primitive(token.kind);
                 Ok(Type {
+                    id: self.next_id(),
                     kind: TypeKind::Primitive(prim),
                     span,
                 })
@@ -329,6 +338,7 @@ impl<'a> Parser<'a> {
                 let path = self.parse_path()?;
                 let end = path.span.end; // path 包含自己的 span
                 Ok(Type {
+                    id: self.next_id(),
                     kind: TypeKind::Named(path),
                     span: Span::new(span.start, end),
                 })
@@ -340,6 +350,7 @@ impl<'a> Parser<'a> {
                 let inner = self.parse_type()?;
                 let end_token = self.expect(TokenKind::RParen)?;
                 Ok(Type {
+                    id: self.next_id(),
                     kind: inner.kind, // 括号只是改变解析优先级，不改变 AST 结构（除非你想保留 ParenType）
                     span: Span::new(span.start, end_token.span.end),
                 })
@@ -384,6 +395,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(Type {
+            id: self.next_id(),
             kind: TypeKind::Function {
                 params,
                 ret_type,
@@ -417,6 +429,7 @@ impl<'a> Parser<'a> {
 
         let end_pos = segments.last().unwrap().span.end;
         Ok(Path {
+            id: self.next_id(),
             segments,
             span: Span::new(start_pos, end_pos),
         })
@@ -778,6 +791,7 @@ impl<'a> Parser<'a> {
                     id: self.next_id(),
                     // 将 self 视为名为 "self" 的 Path
                     kind: ExpressionKind::Path(Path { 
+                        id: self.next_id(),
                         segments: vec![Identifier { name: "self".to_string(), span: tok.span }], 
                         span: tok.span 
                     }),
@@ -898,6 +912,7 @@ impl<'a> Parser<'a> {
             let span = block.span; 
             
             return Ok(Statement {
+                id: self.next_id(),
                 kind: StatementKind::Block(block), // 这里的 kind 变成了 Block(Block)
                 span,
             });
@@ -913,6 +928,7 @@ impl<'a> Parser<'a> {
             let start = self.previous_span().start;
             let end_tok = self.expect(TokenKind::Semi)?;
             return Ok(Statement {
+                id: self.next_id(),
                 kind: StatementKind::Break,
                 span: Span::new(start, end_tok.span.end),
             });
@@ -922,6 +938,7 @@ impl<'a> Parser<'a> {
             let start = self.previous_span().start;
             let end_tok = self.expect(TokenKind::Semi)?;
             return Ok(Statement {
+                id: self.next_id(),
                 kind: StatementKind::Continue,
                 span: Span::new(start, end_tok.span.end),
             });
@@ -953,6 +970,7 @@ impl<'a> Parser<'a> {
         let end = self.expect(TokenKind::RBrace)?.span.end;
         
         Ok(Block {
+            id: self.next_id(),
             stmts,
             span: Span::new(start, end),
         })
@@ -988,6 +1006,7 @@ impl<'a> Parser<'a> {
         let end_tok = self.expect(TokenKind::Semi)?;
 
         Ok(Statement {
+            id: self.next_id(),
             kind: StatementKind::VariableDeclaration {
                 modifier,
                 name,
@@ -1022,6 +1041,7 @@ impl<'a> Parser<'a> {
                 let block = self.parse_block()?;
                 let span = block.span;
                 else_branch = Some(Box::new(Statement {
+                    id: self.next_id(),
                     kind: StatementKind::Block(block),
                     span,
                 }));
@@ -1032,6 +1052,7 @@ impl<'a> Parser<'a> {
         let end = else_branch.as_ref().map(|s| s.span.end).unwrap_or(then_block.span.end);
 
         Ok(Statement {
+            id: self.next_id(),
             kind: StatementKind::If {
                 condition,
                 then_block, // 类型匹配：Block
@@ -1073,6 +1094,7 @@ impl<'a> Parser<'a> {
         let end = body.span.end;
         
         Ok(Statement {
+            id: self.next_id(),
             kind: StatementKind::While {
                 condition,
                 init_statement,
@@ -1094,6 +1116,7 @@ impl<'a> Parser<'a> {
         let end_tok = self.expect(TokenKind::Semi)?;
         
         Ok(Statement {
+            id: self.next_id(),
             kind: StatementKind::Return(value),
             span: Span::new(start, end_tok.span.end),
         })
@@ -1163,6 +1186,7 @@ impl<'a> Parser<'a> {
         let end_tok = self.expect(TokenKind::RBrace)?;
         
         Ok(Statement {
+            id: self.next_id(),
             kind: StatementKind::Switch { target, cases, default_case },
             span: Span::new(start, end_tok.span.end),
         })
@@ -1171,13 +1195,14 @@ impl<'a> Parser<'a> {
     // === 辅助工具：将任意 Statement 转换为 Block ===
     // 如果它本来就是 Block，直接拆包取出；
     // 如果它是单行语句，包装成 Block。
-    fn statement_to_block(&self, stmt: Statement) -> Block {
+    fn statement_to_block(&mut self, stmt: Statement) -> Block {
         match stmt.kind {
             // 如果本身就是 Block (即用户写了 { ... })，直接用里面的 Block 结构
             StatementKind::Block(b) => b,
             
             // 否则 (用户写了 -> ret 0;)，人工构造成 Block
             _ => Block {
+                id: self.next_id(),
                 span: stmt.span, // Block 的范围就是这单行语句的范围
                 stmts: vec![stmt],
             }
@@ -1203,6 +1228,7 @@ impl<'a> Parser<'a> {
             let end_tok = self.expect(TokenKind::Semi)?;
             
             Ok(Statement {
+                id: self.next_id(),
                 kind: StatementKind::Assignment { lhs: expr, rhs },
                 span: Span::new(start, end_tok.span.end),
             })
@@ -1216,6 +1242,7 @@ impl<'a> Parser<'a> {
             // "Error: Statement must be an assignment or a function call."
             
             Ok(Statement {
+                id: self.next_id(),
                 kind: StatementKind::ExpressionStatement(expr),
                 span: Span::new(start, end_tok.span.end),
             })
@@ -1289,6 +1316,7 @@ impl<'a> Parser<'a> {
         let end = self.expect(TokenKind::Semi)?.span.end;
         
         Ok(Item {
+            id: self.next_id(),
             kind: ItemKind::ModuleDecl { name, is_pub, items: None},
             span: Span::new(start, end),
         })
@@ -1307,6 +1335,7 @@ impl<'a> Parser<'a> {
         let end = self.expect(TokenKind::Semi)?.span.end;
         
         Ok(Item {
+            id: self.next_id(),
             kind: ItemKind::Import { path, alias, is_pub },
             span: Span::new(start, end),
         })
@@ -1321,6 +1350,7 @@ impl<'a> Parser<'a> {
         let end = self.expect(TokenKind::Semi)?.span.end;
 
         Ok(Item {
+            id: self.next_id(),
             kind: ItemKind::Typedef { name, target_type },
             span: Span::new(start, end),
         })
@@ -1335,6 +1365,7 @@ impl<'a> Parser<'a> {
         let end = self.expect(TokenKind::Semi)?.span.end;
 
         Ok(Item {
+            id: self.next_id(),
             kind: ItemKind::TypeAlias { name, target_type },
             span: Span::new(start, end),
         })
@@ -1346,6 +1377,7 @@ impl<'a> Parser<'a> {
         let func_def = self.parse_function_definition(is_pub, start, None)?; 
         
         Ok(Item {
+            id: self.next_id(),
             span: func_def.span,
             kind: ItemKind::FunctionDecl(func_def),
         })
@@ -1362,6 +1394,7 @@ impl<'a> Parser<'a> {
         let end = def.span.end;
 
         Ok(Item {
+            id: self.next_id(),
             kind: ItemKind::StructDecl(def),
             span: Span::new(start, end),
         })
@@ -1375,6 +1408,7 @@ impl<'a> Parser<'a> {
         let end = def.span.end;
 
         Ok(Item {
+            id: self.next_id(),
             kind: ItemKind::UnionDecl(def),
             span: Span::new(start, end),
         })
@@ -1438,6 +1472,7 @@ impl<'a> Parser<'a> {
             let ty = p.parse_type()?;
             let semi = p.expect(TokenKind::Semi)?;
             Ok(FieldDefinition {
+                id: p.next_id(),
                 name: field_name.clone(),
                 ty,
                 span: Span::new(field_name.span.start, semi.span.end),
@@ -1519,6 +1554,7 @@ impl<'a> Parser<'a> {
             let semi = p.expect(TokenKind::Semi)?;
             
             Ok(EnumVariant {
+                id: p.next_id(),
                 name: v_name.clone(),
                 value,
                 span: Span::new(v_name.span.start, semi.span.end),
@@ -1526,6 +1562,7 @@ impl<'a> Parser<'a> {
         })?;
 
         Ok(Item {
+            id: self.next_id(),
             kind: ItemKind::EnumDecl(EnumDefinition {
                 name, 
                 underlying_type, 
@@ -1557,6 +1594,7 @@ impl<'a> Parser<'a> {
         let end = self.expect(TokenKind::RBrace)?.span.end;
 
         Ok(Item {
+            id: self.next_id(),
             // 3. 最后这里 move target_type
             kind: ItemKind::Implementation { target_type, methods },
             span: Span::new(start, end),
@@ -1594,6 +1632,7 @@ impl<'a> Parser<'a> {
         let body_span_end = body.span.end;
 
         Ok(FunctionDefinition {
+            id: self.next_id(),
             name,
             params,
             return_type,
@@ -1650,6 +1689,7 @@ impl<'a> Parser<'a> {
                 let real_type = target_type.clone(); 
 
                 params.push(Parameter {
+                    id: self.next_id(),
                     name: Identifier { name: "self".into(), span: self_tok.span },
                     ty: real_type, // <--- 注入真实类型
                     is_mutable: modifier == Mutability::Mutable,
@@ -1667,6 +1707,7 @@ impl<'a> Parser<'a> {
                 let p_type = self.parse_type()?;
                 
                 params.push(Parameter {
+                    id: self.next_id(),
                     name: p_name,
                     ty: p_type,
                     is_mutable: modifier == Mutability::Mutable,

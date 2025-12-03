@@ -14,16 +14,17 @@ pub struct Identifier {
 /// 路径 (例如: std::io::File)
 #[derive(Debug, Clone)]
 pub struct Path {
+    pub id: NodeId,
     pub segments: Vec<Identifier>,
     pub span: Span,
 }
 
 /// 变量/参数的可变性修饰符
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mutability {
     Constant, // const / ^
     Mutable,  // mut / *
-    Immutable,// (default for let)
+    Immutable,// (default for set)
 }
 
 /// 二元运算符
@@ -55,6 +56,7 @@ pub enum UnaryOperator {
 
 #[derive(Debug, Clone)]
 pub struct Type {
+    pub id: NodeId,
     pub kind: TypeKind,
     pub span: Span,
 }
@@ -88,7 +90,7 @@ pub enum TypeKind {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrimitiveType {
     I8, U8, I16, U16, I32, U32, I64, U64, ISize, USize,
     F32, F64,
@@ -201,6 +203,7 @@ pub enum Literal {
 
 #[derive(Debug, Clone)]
 pub struct Statement {
+    pub id: NodeId,
     pub kind: StatementKind,
     pub span: Span,
 }
@@ -267,6 +270,7 @@ pub struct SwitchCase {
 
 #[derive(Debug, Clone)]
 pub struct Block {
+    pub id: NodeId,
     pub stmts: Vec<Statement>,
     pub span: Span, // <--- 这里存 { } 的位置
 }
@@ -282,6 +286,7 @@ pub struct Program {
 
 #[derive(Debug, Clone)]
 pub struct Item {
+    pub id: NodeId,
     pub kind: ItemKind,
     pub span: Span,
 }
@@ -370,6 +375,7 @@ pub struct EnumDefinition {
 
 #[derive(Debug, Clone)]
 pub struct FieldDefinition {
+    pub id: NodeId,
     pub name: Identifier,
     pub ty: Type,
     pub span: Span,
@@ -377,6 +383,7 @@ pub struct FieldDefinition {
 
 #[derive(Debug, Clone)]
 pub struct EnumVariant {
+    pub id: NodeId,
     pub name: Identifier,
     /// 显式赋值 (= INT)
     pub value: Option<Expression>, // 建议存 Expression 而不是 i64，支持常量表达式 (1 << 2)
@@ -385,6 +392,7 @@ pub struct EnumVariant {
 
 #[derive(Debug, Clone)]
 pub struct FunctionDefinition {
+    pub id: NodeId,
     pub name: Identifier,
     pub params: Vec<Parameter>,
     pub return_type: Option<Type>,
@@ -395,6 +403,7 @@ pub struct FunctionDefinition {
 
 #[derive(Debug, Clone)]
 pub struct Parameter {
+    pub id: NodeId,
     pub name: Identifier, // 如果是 self，这里可以是特殊的标识
     pub ty: Type,         // 如果是 self，这里可能是 SelfType
     pub is_mutable: bool,
