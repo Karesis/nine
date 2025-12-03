@@ -27,70 +27,79 @@ impl Driver {
     }
 
     /// 递归解析模块
-    /// is_root: 标记当前解析的文件是否是根文件（影响路径查找策略）
     fn parse_module(&mut self, file_id: FileId, is_root: bool) -> Result<Program, String> {
-        // 1. 获取源码和 【base_offset】
+        // 1. 获取源码和 base_offset
         let file = self.source_manager.get_file(file_id);
         let src = file.src.clone();
-        let base_offset = file.start_pos; // <--- 获取全局偏移
+        let base_offset = file.start_pos;
+        let current_file_path = file.path.clone(); // Clone path to avoid borrow issues
         
-        // 2. Parse (传入 base_offset)
+        // 2. Parse
         let lexer = Lexer::new(&src);
         let mut parser = Parser::new(&src, lexer, base_offset);
         let mut program = parser.parse_program();
 
         if !parser.errors.is_empty() {
-            // 简单报错，实际项目可能需要更漂亮的错误打印
             let file_name = &self.source_manager.get_file(file_id).name;
             return Err(format!("Parse error in {}: {:?}", file_name, parser.errors));
         }
 
-        // 2. 计算子模块查找的基准目录
-        let current_file_path = self.source_manager.get_file(file_id).path.clone();
-        let current_dir = current_file_path.parent().unwrap();
-        
-        // 路径策略：
-        // 如果是 root (main.9)，mod foo -> ./foo.9 (同级)
-        // 如果是 module (foo.9)，mod bar -> ./foo/bar.9 (子级)
+        // === 3. 计算【子模块查找基准目录】 (Search Base) ===
+        let parent_dir = current_file_path.parent().unwrap();
+        let file_stem = current_file_path.file_stem().unwrap().to_str().unwrap();
+
+        // 这里的逻辑需要适配 entry.9 的情况
         let search_dir = if is_root {
-            current_dir.to_path_buf()
+            // 根文件所在目录就是基准
+            parent_dir.to_path_buf()
+        } else if file_stem == "entry" {
+            // 如果当前文件是 "foo/entry.9"，它代表的是 "foo" 模块
+            // 它的子模块（如 "bar"）应该在 "foo/bar.9" 或 "foo/bar/entry.9"
+            // 所以基准目录就是当前 entry.9 所在的目录
+            parent_dir.to_path_buf()
         } else {
-            // 获取文件名（无后缀），例如 "foo.9" -> "foo"
-            let stem = current_file_path.file_stem().unwrap();
-            current_dir.join(stem)
+            // 如果当前文件是 "foo.9" (Sibling style)
+            // 它的子模块应该在 "foo/" 目录下
+            // 所以基准目录是 "./foo/"
+            parent_dir.join(file_stem)
         };
 
-        // 3. 遍历 AST，寻找并加载 ModuleDecl
+        // 4. 遍历 AST，加载 ModuleDecl
         for item in &mut program.items {
             if let ItemKind::ModuleDecl { name, items, .. } = &mut item.kind {
-                // 如果 items 已经是 Some，说明可能被预处理过（或者将来支持内联 mod { ... }）
-                if items.is_some() { continue; }
+                if items.is_some() { continue; } 
 
                 let mod_name = &name.name;
                 
-                // 构造期望的路径： search_dir / mod_name.9
-                let mod_path = search_dir.join(format!("{}.9", mod_name));
+                // === 9-lang 模块查找策略 ===
                 
-                // 检查文件是否存在
-                if !mod_path.exists() {
-                     return Err(format!(
-                         "Module not found: '{}'. Expected at {:?}", 
-                         mod_name, mod_path
-                     ));
-                }
+                // 1. 优先查找同级文件: search_dir/mod_name.9
+                // 例如: .../net.9
+                let path_sibling = search_dir.join(format!("{}.9", mod_name));
+                
+                // 2. 其次查找文件夹入口: search_dir/mod_name/entry.9
+                // 例如: .../net/entry.9
+                let path_entry = search_dir.join(mod_name).join("entry.9");
 
-                // 加载并解析子模块
-                // 注意：子模块 is_root = false
-                let sub_id = self.source_manager.load_file(&mod_path)
+                // 决策
+                let target_path = if path_sibling.exists() {
+                    path_sibling
+                } else if path_entry.exists() {
+                    path_entry
+                } else {
+                    return Err(format!(
+                        "Module '{}' not found.\nSearched at:\n - {:?} (Sibling)\n - {:?} (Entry)", 
+                        mod_name, path_sibling, path_entry
+                    ));
+                };
+
+                // 加载子模块
+                let sub_id = self.source_manager.load_file(&target_path)
                     .map_err(|e| format!("Failed to load module {}: {}", mod_name, e))?;
                 
                 let sub_program = self.parse_module(sub_id, false)?;
 
-                // 核心步骤：将解析出的子 AST 挂载到当前节点的 items 字段
                 *items = Some(sub_program.items);
-                
-                // 可选：打印调试信息
-                println!("Loaded module '{}' from {:?}", mod_name, mod_path);
             }
         }
 

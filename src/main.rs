@@ -1,69 +1,121 @@
-mod source;
-mod token;
-mod lexer;
-mod ast;
-mod parser;
-mod driver;
-mod analyzer;
-
 use std::env;
 use std::path::PathBuf;
+use std::process::exit;
+
+use inkwell::context::Context;
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+};
+use inkwell::OptimizationLevel;
+
+mod ast;
+mod driver;
+mod lexer;
+mod parser;
+mod source;
+mod token;
+mod analyzer;
+mod codegen;
+
 use driver::Driver;
 use analyzer::Analyzer;
+use codegen::CodeGen;
 
 fn main() {
-    // 1. 获取命令行参数，或者默认使用 "test.9"
+    // 1. 参数解析
     let args: Vec<String> = env::args().collect();
-    let entry_file = if args.len() > 1 {
-        args[1].clone()
-    } else {
-        "test.9".to_string()
-    };
+    if args.len() < 2 {
+        eprintln!("Usage: {} <entry_file.9>", args[0]);
+        exit(1);
+    }
+    let entry_path = PathBuf::from(&args[1]);
 
-    println!("=== Compiling [{}] ===", entry_file);
-    let entry_path = PathBuf::from(entry_file);
-
-    // 2. 初始化 Driver
+    // 2. Driver: 解析 AST (Parse)
     let mut driver = Driver::new();
-
-    // 3. 运行 Parser (构建 AST)
-    println!("--- Phase 1: Parsing ---");
-    let program = match driver.compile_project(entry_path) {
+    let program = match driver.compile_project(entry_path.clone()) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Panic/Error during parsing: {}", e);
-            return;
+            eprintln!("Driver Error: {}", e);
+            exit(1);
         }
     };
-    println!("> Parsing complete. Found {} top-level items.", program.items.len());
 
-    // 4. 运行 Analyzer (语义分析 & 类型检查)
-    println!("--- Phase 2: Analyzing ---");
+    // 3. Analyzer: 语义分析 (Type Check)
     let mut analyzer = Analyzer::new();
     analyzer.analyze_program(&program);
 
-    // 5. 检查结果与报错打印
-    if analyzer.ctx.errors.is_empty() {
-        println!("> Analysis Complete: \x1b[32mSUCCESS\x1b[0m"); // 绿色 SUCCESS
-        println!("> Inferred Types: {}", analyzer.ctx.types.len());
-        println!("> Resolved Paths: {}", analyzer.ctx.path_resolutions.len());
-        
-        // 这里可以进行下一步：CodeGen
-        // codegen.generate(&program, &analyzer.ctx);
-    } else {
-        println!("> Analysis Complete: \x1b[31mFAILED\x1b[0m with {} errors:", analyzer.ctx.errors.len()); // 红色 FAILED
-        
-        for (i, err) in analyzer.ctx.errors.iter().enumerate() {
-            // 利用 SourceManager 将全局 Span 转换为 文件名:行:列
+    if !analyzer.ctx.errors.is_empty() {
+        eprintln!("Analysis failed with {} errors:", analyzer.ctx.errors.len());
+        for err in &analyzer.ctx.errors {
+            // 这里可以利用 source_manager 打印更详细的报错 (行号、代码片段)
+            // 简单版本：
             if let Some((file, line, col)) = driver.source_manager.lookup_source(err.span) {
-                // 打印格式： [1] Error in main.9:10:5 -> Type mismatch...
-                println!("[{}] Error in {}:{}:{} -> {}", i + 1, file.name, line, col, err.message);
-                
-                // 可选：打印出错的那一行代码作为上下文
-                // (这需要一些额外的切片逻辑，暂时先不加，防止 index out of bounds)
-            } else {
-                println!("[{}] Error at unknown location ({:?}) -> {}", i + 1, err.span, err.message);
+                eprintln!("  File: {}, Line: {}, Col: {}", file.name, line, col);
+                // 打印源码行
+                // ...
             }
+            eprintln!("  Error: {}", err.message);
+            eprintln!();
         }
+        exit(1);
     }
+
+    // 4. Codegen: 生成 LLVM IR
+    let context = Context::create();
+    let module = context.create_module("main");
+    let builder = context.create_builder();
+
+    let mut codegen = CodeGen::new(&context, &module, &builder, &analyzer.ctx);
+    
+    // 开始编译
+    codegen.compile_program(&program);
+
+    // 5. 输出结果
+    // A. 打印 IR 到标准输出 (调试用)
+    // module.print_to_stderr(); 
+
+    // B. 输出到文件 (entry_file.ll)
+    let output_ll = entry_path.with_extension("ll");
+    if let Err(e) = module.print_to_file(&output_ll) {
+        eprintln!("Error writing LLVM IR: {:?}", e);
+        exit(1);
+    }
+    println!("LLVM IR written to: {:?}", output_ll);
+
+    // C. (可选) 编译为目标机器代码 (.o)
+    // 这需要初始化 TargetMachine
+    if let Err(e) = emit_object_file(&module, &entry_path.with_extension("o")) {
+        eprintln!("Error emitting object file: {:?}", e);
+        // 不退出，因为 IR 可能已经生成成功了
+    } else {
+        println!("Object file written to: {:?}", entry_path.with_extension("o"));
+    }
+}
+
+// 辅助：生成 .o 文件
+fn emit_object_file(module: &inkwell::module::Module, path: &std::path::Path) -> Result<(), String> {
+    // 1. 初始化 Native Target
+    Target::initialize_all(&InitializationConfig::default());
+
+    // 2. 获取 Target Triple
+    let triple = TargetMachine::get_default_triple();
+    module.set_triple(&triple);
+
+    // 3. 创建 Target Machine
+    let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
+    let target_machine = target
+        .create_target_machine(
+            &triple,
+            "generic", // CPU
+            "",        // Features
+            OptimizationLevel::Default,
+            RelocMode::Default,
+            CodeModel::Default,
+        )
+        .ok_or("Could not create target machine")?;
+
+    // 4. 写文件
+    target_machine
+        .write_to_file(module, FileType::Object, path)
+        .map_err(|e| e.to_string())
 }
