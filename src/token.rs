@@ -105,6 +105,7 @@ define_tokens! {
         "const"  => Const,
         "typedef"   => Typedef,
         "typealias" => Typealias,
+        "extern" => Extern,
 
         // 流程控制
         "if"       => If,

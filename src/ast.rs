@@ -415,6 +415,7 @@ pub struct FunctionDefinition {
     pub body: Option<Block>,
     pub is_variadic: bool,
     pub is_pub: bool,
+    pub is_extern: bool,
     pub span: Span,
 }
 

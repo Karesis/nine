@@ -268,8 +268,6 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     }
 
     pub fn compile_function(&mut self, func: &FunctionDefinition) -> Result<(), String> {
-        // 如果没有 body，说明是 extern 声明，直接跳过编译
-        //? 更好的extern语法设计？
         if func.body.is_none() {
             return Ok(());
         }

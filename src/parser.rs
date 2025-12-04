@@ -1336,13 +1336,30 @@ impl<'a> Parser<'a> {
         Program { items }
     }
 
-    /// TopLevelDecl 分发逻辑
+    /// TopLevelDecl 分发
     fn parse_top_level(&mut self) -> ParseResult<Item> {
-        // 1. 处理 Visibility (pub)
+        // 1. 处理 pub
         let is_pub = self.match_token(&[TokenKind::Pub]);
         let start_span = if is_pub { self.previous_span() } else { self.peek().span };
 
-        // 2. 根据关键字分发
+        // 2. 处理 extern 
+        // 支持 pub extern fn ... 或 extern fn ...
+        if self.match_token(&[TokenKind::Extern]) {
+            let start = if is_pub { start_span.start } else { self.previous_span().start };
+            
+            // extern 后面目前暂时只能跟 fn 
+            //? TODO: extern var
+            // 传入 is_extern = true
+            let func_def = self.parse_function_definition(is_pub, true, start, None)?;
+            
+            return Ok(Item {
+                id: self.next_id(),
+                span: func_def.span,
+                kind: ItemKind::FunctionDecl(func_def),
+            });
+        }
+
+        // 3. 根据关键字分发
         let token = self.peek();
         match token.kind {
             TokenKind::Mod => self.parse_module_decl(is_pub, start_span.start),
@@ -1353,12 +1370,11 @@ impl<'a> Parser<'a> {
             TokenKind::Fn => self.parse_fn_decl(is_pub, start_span.start),
             TokenKind::Typedef => self.parse_typedef_decl(is_pub, start_span.start),
             TokenKind::Typealias => self.parse_typealias_decl(is_pub, start_span.start),
-            // set/mut/const 开头
+            
             TokenKind::Set | TokenKind::Mut | TokenKind::Const => {
                 self.parse_global_variable(is_pub, start_span.start)
             }
 
-            // "imp" 不能带 pub
             TokenKind::Imp => {
                 if is_pub {
                     return Err(ParseError {
@@ -1442,8 +1458,8 @@ impl<'a> Parser<'a> {
 
     // FnDecl -> ["pub"] "fn" Identifier "(" [ ParamList ] ")" [ "->" Type ] Block 
     fn parse_fn_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
-        // 调用通用的函数解析器，allow_self = false
-        let func_def = self.parse_function_definition(is_pub, start, None)?; 
+        // 调用通用的函数解析器，allow_self = false, is_extern = false
+        let func_def = self.parse_function_definition(is_pub, false, start, None)?;
         
         Ok(Item {
             id: self.next_id(),
@@ -1508,11 +1524,10 @@ impl<'a> Parser<'a> {
             if is_fn {
                 let is_method_pub = self.match_token(&[TokenKind::Pub]);
                 let fn_start = if is_method_pub { self.previous_span().start } else { self.peek().span.start };
-                // 静态方法不允许 self
-                static_methods.push(self.parse_function_definition(is_method_pub, fn_start, None)?);
+                
+                static_methods.push(self.parse_function_definition(is_method_pub, false, fn_start, None)?);
             } else {
-                // 2. 如果不是方法，那就是数据成员 (Field 或 Variant)
-                // 调用传入的闭包来解析
+                // 2. 如果不是方法，那就是数据成员
                 items.push(parse_item(self)?);
             }
         }
@@ -1655,7 +1670,7 @@ impl<'a> Parser<'a> {
         while !self.check(TokenKind::RBrace) && !self.is_at_end() {
             let is_pub = self.match_token(&[TokenKind::Pub]);
             let fn_start = if is_pub { self.previous_span().start } else { self.peek().span.start };
-            methods.push(self.parse_function_definition(is_pub, fn_start, Some(&target_type))?);
+            methods.push(self.parse_function_definition(is_pub, false, fn_start, Some(&target_type))?);
         }
         
         let end = self.expect(TokenKind::RBrace)?.span.end;
@@ -1713,6 +1728,7 @@ impl<'a> Parser<'a> {
     fn parse_function_definition(
         &mut self, 
         is_pub: bool, 
+        is_extern: bool, // <--- 【新增参数】
         start: usize, 
         ctx_type: Option<&Type> 
     ) -> ParseResult<FunctionDefinition> {
@@ -1721,7 +1737,6 @@ impl<'a> Parser<'a> {
         
         self.expect(TokenKind::LParen)?;
         
-        // 修改：接收 is_variadic
         let (params, is_variadic) = self.parse_param_list(ctx_type)?;
         
         self.expect(TokenKind::RParen)?;
@@ -1757,6 +1772,7 @@ impl<'a> Parser<'a> {
             body,          
             is_variadic,   
             is_pub,
+            is_extern, // <--- 【存入 AST】
             span: Span::new(start, end_pos),
         })
     }

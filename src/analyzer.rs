@@ -209,12 +209,16 @@ impl Analyzer {
                 }
 
                 // --- 函数 / 类型别名 ---
-                ItemKind::FunctionDecl(def) => {
+               ItemKind::FunctionDecl(def) => {
                     self.define_symbol(def.name.name.clone(), def.id, def.name.span);
                     
-                    // 生成并记录修饰名
-                    // e.g., math 模块下的 add -> math_add
-                    let mangled = self.generate_mangled_name(&def.name.name);
+                    // 如果是 extern，直接用原名；否则加模块前缀
+                    let mangled = if def.is_extern {
+                        def.name.name.clone() // "printf" -> "printf"
+                    } else {
+                        self.generate_mangled_name(&def.name.name) // "add" -> "math_add"
+                    };
+                    
                     self.ctx.mangled_names.insert(def.id, mangled);
                 }
 
