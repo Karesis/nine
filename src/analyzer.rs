@@ -70,6 +70,7 @@ pub struct AnalysisContext {
     /// Value: Mutability
     pub mutabilities: HashMap<DefId, Mutability>,
     pub mangled_names: HashMap<DefId, String>,
+    pub constants: HashMap<DefId, u64>,
     pub errors: Vec<AnalyzeError>,
 }
 
@@ -83,6 +84,7 @@ impl AnalysisContext {
             struct_fields: HashMap::new(),
             mutabilities: HashMap::new(),
             mangled_names: HashMap::new(),
+            constants: HashMap::new(),
             errors: Vec::new(),
         }
     }
@@ -509,16 +511,37 @@ impl Analyzer {
                     let declared_ty = self.ctx.types.get(&item.id).unwrap().clone();
                     
                     if let Some(init) = &def.initializer {
-                        // 检查初始化表达式
+                        // 1. 检查类型 (原有逻辑)
                         let init_ty = self.check_expr(init);
                         self.check_type_match(&declared_ty, &init_ty, init.span);
                         self.coerce_literal_type(init.id, &declared_ty, &init_ty);
                         
-                        // TODO: 可以在这里检查 init 是否为 Compile-Time Constant
-                        // 目前我们靠 Codegen 里的处理来隐式限制
+                        // ===============================================
+                        // 【第三步新增】：全局初始化求值
+                        // ===============================================
+                        
+                        // 尝试计算表达式的值 (例如 1 << 12)
+                        if let Some(val) = self.eval_constant_expr(init) {
+                            // 算出来了！
+                            
+                            // 如果是 const 定义，必须注册到常量表，供后续引用
+                            if def.modifier == Mutability::Constant {
+                                self.ctx.constants.insert(item.id, val);
+                            }
+                            
+                            // 重要：对于 mut/set 全局变量，虽然不用注册给别人用，
+                            // 但算出值来对 Codegen 很有用（Codegen 可以直接用这个值生成 Global Initializer）
+                            // 我们可以把这个值也临时存到 constants 表里，或者专门开一个 global_init_values 表。
+                            // 为了简单，我们暂且都存入 constants 表。
+                            self.ctx.constants.insert(item.id, val);
+
+                        } else {
+                            // 如果算不出来（比如调用了函数），在 OS 开发初期，我们报错
+                            // 因为我们还没有实现 __cxa_atexit 这种运行时全局构造机制
+                            self.error("Global initializer must be a constant expression (integer arithmetic)", init.span);
+                        }
+
                     } else {
-                        // OS 开发中，未初始化的全局变量通常放在 .bss 段，是合法的
-                        // 但 const/set 必须初始化
                         if def.modifier != Mutability::Mutable {
                             self.error("Immutable/Const globals must be initialized", def.span);
                         }
@@ -577,6 +600,18 @@ impl Analyzer {
                     let init_type = self.check_expr(init_expr);
                     self.check_type_match(&declared_type, &init_type, init_expr.span);
                     self.coerce_literal_type(init_expr.id, &declared_type, &init_type);
+                    if *modifier == Mutability::Constant {
+                        // 调用我们上一轮写好的求值器
+                        if let Some(val) = self.eval_constant_expr(init_expr) {
+                            // 存入 Context 的常量表
+                            self.ctx.constants.insert(stmt.id, val);
+                            
+                            // 顺便打印一下调试信息，看看是否算对了
+                            // println!("DEBUG: Constant '{}' evaluated to {}", name.name, val);
+                        } else {
+                            self.error("Constant value must be computable at compile time (literals only for now)", init_expr.span);
+                        }
+                    }
                 } else {
                     // 没有初始化：检查修饰符是否允许
                     match modifier {
@@ -1309,6 +1344,56 @@ impl Analyzer {
             TypeKind::Array { inner, .. } => format!("Arr_{}", self.get_mangling_type_name(inner)), // 简单处理
             TypeKind::Primitive(p) => format!("{:?}", p), // e.g. "I32"
             _ => "Unknown".to_string(),
+        }
+    }
+
+    /// 尝试计算编译时常量表达式
+    /// 如果计算成功，返回 Some(u64)
+    /// 如果包含无法在编译期确定的内容（如函数调用、变量），返回 None
+    fn eval_constant_expr(&self, expr: &Expression) -> Option<u64> {
+        match &expr.kind {
+            // 1. 字面量
+            ExpressionKind::Literal(Literal::Integer(val)) => Some(*val),
+            
+            // 2. 引用其他常量
+            ExpressionKind::Path(path) => {
+                let def_id = self.ctx.path_resolutions.get(&path.id)?;
+                // 只有当目标是 const 定义时，才能取值
+                self.ctx.constants.get(def_id).cloned()
+            },
+
+            // 3. 二元运算 (递归计算)
+            ExpressionKind::Binary { lhs, op, rhs } => {
+                let l = self.eval_constant_expr(lhs)?;
+                let r = self.eval_constant_expr(rhs)?;
+                
+                match op {
+                    BinaryOperator::Add => Some(l.wrapping_add(r)),
+                    BinaryOperator::Subtract => Some(l.wrapping_sub(r)),
+                    BinaryOperator::Multiply => Some(l.wrapping_mul(r)),
+                    BinaryOperator::Divide => if r == 0 { None } else { Some(l / r) },
+                    BinaryOperator::Modulo => if r == 0 { None } else { Some(l % r) },
+                    
+                    // 位运算
+                    BinaryOperator::ShiftLeft => Some(l << r),
+                    BinaryOperator::ShiftRight => Some(l >> r),
+                    BinaryOperator::BitwiseAnd => Some(l & r),
+                    BinaryOperator::BitwiseOr  => Some(l | r),
+                    BinaryOperator::BitwiseXor => Some(l ^ r),
+                    
+                    _ => None, // 比较运算暂不支持作为数值常量
+                }
+            },
+            
+            // 4. 一元运算
+            ExpressionKind::Unary { op: UnaryOperator::Negate, operand } => {
+                let val = self.eval_constant_expr(operand)?;
+                // 这里按位取负 (u64 view)
+                Some((-(val as i64)) as u64) 
+            },
+
+            // 其他情况（函数调用等）不是常量
+            _ => None,
         }
     }
 }

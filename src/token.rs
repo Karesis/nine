@@ -139,6 +139,8 @@ define_tokens! {
         "*" => Star,
         "/" => Slash,
         "%" => Percent,
+        "<<" => Shl, // Shift Left
+        ">>" => Shr, // Shift Right
 
         // 比较
         "==" => EqEq,

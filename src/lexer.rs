@@ -103,7 +103,9 @@ impl<'a> Lexer<'a> {
             }
 
             '<' => {
-                if self.match_char('=') {
+                if self.match_char('<') {
+                    self.make_token(TokenKind::Shl) // <<
+                } else if self.match_char('=') {
                     self.make_token(TokenKind::LtEq)
                 } else {
                     self.make_token(TokenKind::Lt)
@@ -111,7 +113,9 @@ impl<'a> Lexer<'a> {
             }
 
             '>' => {
-                if self.match_char('=') {
+                if self.match_char('>') {
+                    self.make_token(TokenKind::Shr) // >>
+                } else if self.match_char('=') {
                     self.make_token(TokenKind::GtEq)
                 } else {
                     self.make_token(TokenKind::Gt)
@@ -153,7 +157,57 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_number(&mut self) -> Token {
-        // 扫描整数部分
+        // 1. 检查是否是 0x, 0b, 0o
+        if self.src[self.current_pos..].starts_with('0') {
+            let mut lookahead = self.chars.clone();
+            lookahead.next(); // 0
+            if let Some(c) = lookahead.next() {
+                match c {
+                    'x' | 'X' => {
+                        self.advance(); // 0
+                        self.advance(); // x
+                        // 扫描 Hex 数字 (0-9, a-f, A-F, _)
+                        while let Some(&c) = self.chars.peek() {
+                            if c.is_ascii_hexdigit() || c == '_' {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        return self.make_token(TokenKind::Integer);
+                    }
+                    'b' | 'B' => {
+                        self.advance(); // 0
+                        self.advance(); // b
+                        // 扫描 Bin 数字 (0-1, _)
+                        while let Some(&c) = self.chars.peek() {
+                            if c == '0' || c == '1' || c == '_' {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        return self.make_token(TokenKind::Integer);
+                    }
+                    'o' | 'O' => {
+                        self.advance(); // 0
+                        self.advance(); // o
+                        // 扫描 Oct 数字 (0-7, _)
+                        while let Some(&c) = self.chars.peek() {
+                            if (c >= '0' && c <= '7') || c == '_' {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        return self.make_token(TokenKind::Integer);
+                    }
+                    _ => {} // 只是普通的 0 开头数字
+                }
+            }
+        }
+
+        // 2. 普通十进制扫描 (原逻辑)
         while let Some(&c) = self.chars.peek() {
             if c.is_ascii_digit() || c == '_' {
                 self.advance();
@@ -162,19 +216,13 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        // 扫描小数部分
-        // 只有当 '.' 后面紧跟数字时，才视为浮点数
-        // 避免 range 操作 `0..10` 被误判（虽然本语言只有 `::`）
-        // 也要处理 `1.method()` 的情况。通常 `1.` 被视为浮点，`1.f` 也是。
-        // 简单策略：如果遇到 . 且后面是数字，则吞噬
+        // 3. 扫描小数部分 (原逻辑)
         if let Some(&'.') = self.chars.peek() {
-            // 查看下一位，但不消耗
             let mut iter_clone = self.chars.clone();
-            iter_clone.next(); // 越过 .
+            iter_clone.next(); 
             if let Some(next_c) = iter_clone.next() {
                 if next_c.is_ascii_digit() {
-                    // 确认是浮点数
-                    self.advance(); // 吞掉 .
+                    self.advance(); // .
                     while let Some(&c) = self.chars.peek() {
                         if c.is_ascii_digit() || c == '_' {
                             self.advance();

@@ -568,9 +568,9 @@ impl<'a> Parser<'a> {
         Ok(lhs)
     }
 
-    /// Level 4: Relational -> Additive { ("<"|"<="|">"|">=") Additive }
+    /// Level 4: Relational -> Shift
     fn parse_relational(&mut self) -> ParseResult<Expression> {
-        let mut lhs = self.parse_additive()?;
+        let mut lhs = self.parse_shift()?;
 
         while self.match_token(&[TokenKind::Lt, TokenKind::LtEq, TokenKind::Gt, TokenKind::GtEq]) {
             let op = match self.previous_kind {
@@ -580,8 +580,29 @@ impl<'a> Parser<'a> {
                 TokenKind::GtEq => BinaryOperator::GreaterEqual,
                 _ => unreachable!(),
             };
-            let rhs = self.parse_additive()?;
+            let rhs = self.parse_shift()?;
             
+            let span = Span::new(lhs.span.start, rhs.span.end);
+            lhs = Expression {
+                id: self.next_id(),
+                kind: ExpressionKind::Binary { lhs: Box::new(lhs), op, rhs: Box::new(rhs) },
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    // New Level: Shift -> Additive { ("<"|"<="|">"|">=") Additive }
+    fn parse_shift(&mut self) -> ParseResult<Expression> {
+        let mut lhs = self.parse_additive()?;
+
+        while self.match_token(&[TokenKind::Shl, TokenKind::Shr]) {
+            let op = match self.previous_kind {
+                TokenKind::Shl => BinaryOperator::ShiftLeft,
+                TokenKind::Shr => BinaryOperator::ShiftRight,
+                _ => unreachable!(),
+            };
+            let rhs = self.parse_additive()?;
             let span = Span::new(lhs.span.start, rhs.span.end);
             lhs = Expression {
                 id: self.next_id(),
@@ -909,10 +930,27 @@ impl<'a> Parser<'a> {
             TokenKind::True => Ok(Literal::Boolean(true)),
             TokenKind::False => Ok(Literal::Boolean(false)),
             TokenKind::Integer => {
-                // 处理 0xFF, 1_000 等，Rust parse 支持部分，
-                let val = text.replace('_', "").parse::<u64>().map_err(|_| ParseError{
-                    expected: "Integer".into(), found: token.kind, span: token.span, message: "Invalid integer".into()
+                // 去掉下划线
+                let clean_text = text.replace('_', "");
+                
+                // 判断进制
+                let (num_str, radix) = if clean_text.starts_with("0x") || clean_text.starts_with("0X") {
+                    (&clean_text[2..], 16)
+                } else if clean_text.starts_with("0b") || clean_text.starts_with("0B") {
+                    (&clean_text[2..], 2)
+                } else if clean_text.starts_with("0o") || clean_text.starts_with("0O") {
+                    (&clean_text[2..], 8)
+                } else {
+                    (clean_text.as_str(), 10)
+                };
+
+                let val = u64::from_str_radix(num_str, radix).map_err(|_| ParseError {
+                    expected: "Integer".into(),
+                    found: token.kind,
+                    span: token.span,
+                    message: format!("Invalid integer literal '{}'", text),
                 })?;
+                
                 Ok(Literal::Integer(val))
             },
             TokenKind::Float => {

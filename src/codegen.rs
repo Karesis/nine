@@ -1135,6 +1135,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
     }
 
+    // 【新增/修改】全局变量编译逻辑
     fn compile_global_variable(&mut self, id: DefId, def: &GlobalDefinition) {
         // 1. 获取类型
         let ty_key = self.analyzer.types.get(&id).unwrap();
@@ -1151,34 +1152,44 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         
         // 5. 设置初始化值
         if let Some(init) = &def.initializer {
-            // 核心难点：compile_expr 生成的是 instructions (BasicValueEnum)，依赖 builder。
-            // 但 Global Initializer 必须是 ConstantValue。
-            // 
-            // 简单起见，我们在 MVP 阶段只支持 Literal 初始化。
-            // 如果用户写 set x = 1 + 2; 这种需要 Const Folding (常量折叠)，目前先不支持。
-            
+            // 策略 A: 如果是简单字面量 (String, Float, Bool)，直接编译
+            // (因为我们的 eval_constant_expr 目前主要处理整数)
             if let ExpressionKind::Literal(lit) = &init.kind {
-                // 使用我们现有的 compile_literal，它返回的正是 BasicValueEnum
-                // 只要 Literal 编译出来的是 ConstInt/ConstFloat/GlobalStringPtr，就可以用。
-                
-                // 注意：compile_literal 里需要 type_key，Analyzer 已经回写到 init.id 了
                 let lit_ty = self.analyzer.types.get(&init.id).unwrap();
                 let val = self.compile_literal(lit, lit_ty).expect("Literal compile failed");
-                
                 global.set_initializer(&val);
+            } 
+            // 策略 B: 如果 Analyzer 已经计算出了整数值 (适用于 Int 运算和 指针强转)
+            else if let Some(&const_val) = self.analyzer.constants.get(&id) {
+                // const_val 是 u64，我们需要根据 llvm_ty 把它转成 LLVM 常量
+                
+                if llvm_ty.is_int_type() {
+                    // 情况 1: 整数类型 (i32, u64...)
+                    let int_ty = llvm_ty.into_int_type();
+                    // false 表示视为无符号处理 (raw bits)，这对于 bitmask 很重要
+                    let val = int_ty.const_int(const_val, false);
+                    global.set_initializer(&val.as_basic_value_enum());
+                } else if llvm_ty.is_pointer_type() {
+                    // 情况 2: 指针类型 (例如 0xB8000 as *u16)
+                    // LLVM 要求使用 const_int_to_ptr 指令
+                    let i64_ty = self.context.i64_type();
+                    let int_val = i64_ty.const_int(const_val, false);
+                    
+                    let ptr_val = int_val.const_to_pointer(llvm_ty.into_pointer_type());
+                    global.set_initializer(&ptr_val.as_basic_value_enum());
+                } else {
+                    // 其他类型暂不支持计算初始化 (比如 Struct 常量，需要 const struct builder)
+                    panic!("Global variable has computed value but type {:?} is not supported for auto-init yet", llvm_ty);
+                }
             } else {
-                // 如果是复杂表达式，对于 OS 来说暂不支持
-                // 未来可以实现一个 compile_const_expr
-                panic!("Global variable initializer must be a literal (for now).");
+                panic!("Global initializer is too complex (not a literal, and analyzer couldn't eval it).");
             }
         } else {
             // 如果没有初始化值，设置为 Zero Initializer (.bss)
             global.set_initializer(&llvm_ty.const_zero());
         }
 
-        // 6. 【关键】注册到符号表
-        // 这样 compile_expr_ptr 中的 ExpressionKind::Path 就能查到它了！
-        // global.as_pointer_value() 就是这个全局变量的地址
+        // 6. 注册到符号表
         self.variables.insert(id, global.as_pointer_value());
     }
 

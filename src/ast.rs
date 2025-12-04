@@ -37,7 +37,7 @@ pub enum BinaryOperator {
     // 算术
     Add, Subtract, Multiply, Divide, Modulo,
     // 位运算 (band, bor, xor)
-    BitwiseAnd, BitwiseOr, BitwiseXor,
+    BitwiseAnd, BitwiseOr, BitwiseXor, ShiftLeft, ShiftRight,
 }
 
 /// 一元运算符
