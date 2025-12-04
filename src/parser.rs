@@ -1548,6 +1548,7 @@ impl<'a> Parser<'a> {
                          initializer: None, // extern 变量没有初始化器
                          is_extern: true,   // <--- 需要在 AST 中添加这个字段！
                          span: Span::new(start, end),
+                         is_pub,
                      }),
                      span: Span::new(start, end),
                  });
@@ -1639,7 +1640,7 @@ impl<'a> Parser<'a> {
     }
 
     // TypedefDecl -> "typedef" Identifier "=" Type ";"
-    fn parse_typedef_decl(&mut self, _is_pub: bool, start: usize) -> ParseResult<Item> {
+    fn parse_typedef_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Typedef)?;
         let name = self.parse_identifier()?;
         self.expect(TokenKind::Eq)?;
@@ -1648,13 +1649,13 @@ impl<'a> Parser<'a> {
 
         Ok(Item {
             id: self.next_id(),
-            kind: ItemKind::Typedef { name, target_type },
+            kind: ItemKind::Typedef { name, target_type, is_pub},
             span: Span::new(start, end),
         })
     }
 
     // TypeAliasDecl -> "typealias" Identifier "=" Type ";"
-    fn parse_typealias_decl(&mut self, _is_pub: bool, start: usize) -> ParseResult<Item> {
+    fn parse_typealias_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Typealias)?;
         let name = self.parse_identifier()?;
         self.expect(TokenKind::Eq)?;
@@ -1663,7 +1664,7 @@ impl<'a> Parser<'a> {
 
         Ok(Item {
             id: self.next_id(),
-            kind: ItemKind::TypeAlias { name, target_type },
+            kind: ItemKind::TypeAlias { name, target_type, is_pub},
             span: Span::new(start, end),
         })
     }
@@ -1685,9 +1686,9 @@ impl<'a> Parser<'a> {
     // ==========================================
 
     // StructDecl -> "struct" [ "(" INT ")" ] Identifier "{" ... "}"
-    fn parse_struct_decl(&mut self, _is_pub: bool, start: usize) -> ParseResult<Item> {
+    fn parse_struct_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
         // 调用通用解析逻辑，传入 Struct 关键字
-        let def = self.parse_record_definition(TokenKind::Struct, start)?;
+        let def = self.parse_record_definition(TokenKind::Struct, start, is_pub)?;
         let end = def.span.end;
 
         Ok(Item {
@@ -1698,9 +1699,9 @@ impl<'a> Parser<'a> {
     }
 
     // UnionDecl -> "union" [ "(" INT ")" ] Identifier "{" ... "}"
-    fn parse_union_decl(&mut self, _is_pub: bool, start: usize) -> ParseResult<Item> {
+    fn parse_union_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
         // 调用通用解析逻辑，传入 Union 关键字
-        let def = self.parse_record_definition(TokenKind::Union, start)?;
+        let def = self.parse_record_definition(TokenKind::Union, start, is_pub)?;
         let end = def.span.end;
 
         Ok(Item {
@@ -1764,6 +1765,7 @@ impl<'a> Parser<'a> {
         &mut self,
         keyword: TokenKind,
         start: usize,
+        is_pub: bool,
     ) -> ParseResult<StructDefinition> {
         self.expect(keyword)?;
 
@@ -1792,6 +1794,7 @@ impl<'a> Parser<'a> {
             static_methods,
             alignment,
             span: Span::new(start, body_span.end),
+            is_pub,
         })
     }
 
@@ -1836,7 +1839,7 @@ impl<'a> Parser<'a> {
     }
 
     // EnumDecl -> "enum" Identifier [ ":" IntType ] "{" { EnumMember } "}"
-    fn parse_enum_decl(&mut self, _is_pub: bool, start: usize) -> ParseResult<Item> {
+    fn parse_enum_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Enum)?;
         let name = self.parse_identifier()?;
 
@@ -1882,6 +1885,7 @@ impl<'a> Parser<'a> {
                 variants,
                 static_methods,
                 span: Span::new(start, body_span.end),
+                is_pub,
             }),
             span: Span::new(start, body_span.end),
         })
@@ -1927,7 +1931,7 @@ impl<'a> Parser<'a> {
     }
 
     // 解析逻辑
-    fn parse_global_variable(&mut self, _is_pub: bool, start: usize) -> ParseResult<Item> {
+    fn parse_global_variable(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
         // 1. Modifier
         let modifier = if self.match_token(&[TokenKind::Mut]) {
             Mutability::Mutable
@@ -1962,7 +1966,8 @@ impl<'a> Parser<'a> {
                 modifier,
                 initializer,
                 span: Span::new(start, end_tok.span.end),
-                is_extern: false
+                is_extern: false,
+                is_pub,
             }),
             span: Span::new(start, end_tok.span.end),
         })

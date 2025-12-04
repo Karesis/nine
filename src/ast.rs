@@ -365,6 +365,7 @@ pub enum ItemKind {
     Typedef {
         name: Identifier,
         target_type: Type,
+        is_pub: bool,
     },
 
     /// 类型别名 (typealias A = B)
@@ -372,6 +373,7 @@ pub enum ItemKind {
     TypeAlias {
         name: Identifier,
         target_type: Type,
+        is_pub: bool,
     },
 
     /// 函数定义
@@ -396,6 +398,7 @@ pub struct GlobalDefinition {
     pub initializer: Option<Expression>,
     pub span: Span,
     pub is_extern: bool,
+    pub is_pub: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -412,6 +415,7 @@ pub struct StructDefinition {
     pub alignment: Option<u32>,
 
     pub span: Span,
+    pub is_pub: bool,
 }
 
 /// 枚举定义
@@ -427,6 +431,7 @@ pub struct EnumDefinition {
     pub static_methods: Vec<FunctionDefinition>,
 
     pub span: Span,
+    pub is_pub: bool,
 }
 
 #[derive(Debug, Clone)]
