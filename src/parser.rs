@@ -955,6 +955,25 @@ impl<'a> Parser<'a> {
                 })
             }
 
+            // 内置函数 @sizeof(T)
+            TokenKind::At => {
+                let start = self.advance().span.start; // 吃掉 '@'
+                
+                //? TODO: @alignof(T)
+                self.expect(TokenKind::SizeOf)?;
+                self.expect(TokenKind::LParen)?;
+                
+                let target_type = self.parse_type()?;
+                
+                let end = self.expect(TokenKind::RParen)?.span.end;
+                
+                Ok(Expression {
+                    id: self.next_id(),
+                    kind: ExpressionKind::SizeOf(target_type),
+                    span: Span::new(start, end),
+                })
+            }
+
             _ => Err(ParseError {
                 expected: "Expression".into(),
                 found: token.kind,

@@ -830,6 +830,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     Err("Static access (non-enum) not implemented".into())
                 }
             }
+
+            // 处理 @sizeof
+            ExpressionKind::SizeOf(target_type) => {
+                self.compile_sizeof(target_type)
+            }
         }
     }
 
@@ -974,14 +979,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let lhs_val = self.compile_expr(lhs)?;
         let rhs_val = self.compile_expr(rhs)?;
 
-        // 获取 LHS 的类型信息 (Analyzer 保证了 LHS 和 RHS 类型兼容)
-        let type_key = self
-            .analyzer
-            .types
-            .get(&lhs.id)
-            .ok_or("Type missing for binary op")?;
-        let is_signed = self.is_signed(type_key);
-        // 如果是 Float，需要一套完全不同的 build_float_* 指令
+        // 1. 浮点数处理
         if lhs_val.is_float_value() {
             return self.compile_float_binary(
                 lhs_val.into_float_value(),
@@ -990,118 +988,85 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             );
         }
 
-        let l = lhs_val.into_int_value();
-        let r = rhs_val.into_int_value();
-
-        match op {
-            // 加减乘：LLVM 底层指令对于有符号/无符号是一样的
-            //? TODO：检测溢出 (nsw/nuw)
-            BinaryOperator::Add => Ok(self.builder.build_int_add(l, r, "add").unwrap().into()),
-            BinaryOperator::Subtract => Ok(self.builder.build_int_sub(l, r, "sub").unwrap().into()),
-            BinaryOperator::Multiply => Ok(self.builder.build_int_mul(l, r, "mul").unwrap().into()),
-
-            // 位运算
-            BinaryOperator::BitwiseAnd => Ok(self.builder.build_and(l, r, "and").unwrap().into()),
-            BinaryOperator::BitwiseOr => Ok(self.builder.build_or(l, r, "or").unwrap().into()),
-            BinaryOperator::BitwiseXor => Ok(self.builder.build_xor(l, r, "xor").unwrap().into()),
-
-            // 除法：区分符号
-            BinaryOperator::Divide => {
-                if is_signed {
-                    Ok(self
-                        .builder
-                        .build_int_signed_div(l, r, "sdiv")
-                        .unwrap()
-                        .into())
-                } else {
-                    Ok(self
-                        .builder
-                        .build_int_unsigned_div(l, r, "udiv")
-                        .unwrap()
-                        .into())
-                }
-            }
-
-            // 取模：区分符号
-            BinaryOperator::Modulo => {
-                if is_signed {
-                    Ok(self
-                        .builder
-                        .build_int_signed_rem(l, r, "srem")
-                        .unwrap()
-                        .into())
-                } else {
-                    Ok(self
-                        .builder
-                        .build_int_unsigned_rem(l, r, "urem")
-                        .unwrap()
-                        .into())
-                }
-            }
-
-            // 比较运算：区分 Predicate
-            BinaryOperator::Equal => Ok(self
-                .builder
-                .build_int_compare(IntPredicate::EQ, l, r, "eq")
-                .unwrap()
-                .into()),
-            BinaryOperator::NotEqual => Ok(self
-                .builder
-                .build_int_compare(IntPredicate::NE, l, r, "ne")
-                .unwrap()
-                .into()),
-
-            BinaryOperator::Less => {
-                let pred = if is_signed {
-                    IntPredicate::SLT
-                } else {
-                    IntPredicate::ULT
-                };
-                Ok(self
-                    .builder
-                    .build_int_compare(pred, l, r, "lt")
-                    .unwrap()
-                    .into())
-            }
-            BinaryOperator::LessEqual => {
-                let pred = if is_signed {
-                    IntPredicate::SLE
-                } else {
-                    IntPredicate::ULE
-                };
-                Ok(self
-                    .builder
-                    .build_int_compare(pred, l, r, "le")
-                    .unwrap()
-                    .into())
-            }
-            BinaryOperator::Greater => {
-                let pred = if is_signed {
-                    IntPredicate::SGT
-                } else {
-                    IntPredicate::UGT
-                };
-                Ok(self
-                    .builder
-                    .build_int_compare(pred, l, r, "gt")
-                    .unwrap()
-                    .into())
-            }
-            BinaryOperator::GreaterEqual => {
-                let pred = if is_signed {
-                    IntPredicate::SGE
-                } else {
-                    IntPredicate::UGE
-                };
-                Ok(self
-                    .builder
-                    .build_int_compare(pred, l, r, "ge")
-                    .unwrap()
-                    .into())
-            }
-
-            _ => Err(format!("Binary op {:?} not supported for integer", op)),
+        // 2. 【关键修复】指针处理
+        // 如果直接对指针调用 into_int_value() 会导致 Panic
+        if lhs_val.is_pointer_value() {
+            // 获取 LHS 的类型信息 (Analyzer 必须保证类型存在)
+            let lhs_type_key = self.analyzer.types.get(&lhs.id).ok_or("Type missing for pointer op")?;
+            
+            return self.compile_pointer_binary(
+                lhs_val.into_pointer_value(), 
+                op, 
+                rhs_val, 
+                lhs_type_key
+            );
         }
+
+        // 3. 整数处理 (默认)
+        if lhs_val.is_int_value() && rhs_val.is_int_value() {
+            let l = lhs_val.into_int_value();
+            let r = rhs_val.into_int_value();
+            
+            // 获取类型以判断符号 (Signed/Unsigned)
+            let type_key = self.analyzer.types.get(&lhs.id).ok_or("Type missing for binary op")?;
+            let is_signed = self.is_signed(type_key);
+
+            //? TODO: 检测溢出？
+            return match op {
+                BinaryOperator::Add => Ok(self.builder.build_int_add(l, r, "add").unwrap().into()),
+                BinaryOperator::Subtract => Ok(self.builder.build_int_sub(l, r, "sub").unwrap().into()),
+                BinaryOperator::Multiply => Ok(self.builder.build_int_mul(l, r, "mul").unwrap().into()),
+                
+                // 位运算
+                BinaryOperator::BitwiseAnd => Ok(self.builder.build_and(l, r, "and").unwrap().into()),
+                BinaryOperator::BitwiseOr => Ok(self.builder.build_or(l, r, "or").unwrap().into()),
+                BinaryOperator::BitwiseXor => Ok(self.builder.build_xor(l, r, "xor").unwrap().into()),
+
+                // 除法 & 取模
+                BinaryOperator::Divide => {
+                    if is_signed {
+                        Ok(self.builder.build_int_signed_div(l, r, "sdiv").unwrap().into())
+                    } else {
+                        Ok(self.builder.build_int_unsigned_div(l, r, "udiv").unwrap().into())
+                    }
+                }
+                BinaryOperator::Modulo => {
+                    if is_signed {
+                        Ok(self.builder.build_int_signed_rem(l, r, "srem").unwrap().into())
+                    } else {
+                        Ok(self.builder.build_int_unsigned_rem(l, r, "urem").unwrap().into())
+                    }
+                }
+
+                // 移位
+                BinaryOperator::ShiftLeft => Ok(self.builder.build_left_shift(l, r, "shl").unwrap().into()),
+                BinaryOperator::ShiftRight => Ok(self.builder.build_right_shift(l, r, is_signed, "shr").unwrap().into()),
+
+                // 比较
+                BinaryOperator::Equal => Ok(self.builder.build_int_compare(IntPredicate::EQ, l, r, "eq").unwrap().into()),
+                BinaryOperator::NotEqual => Ok(self.builder.build_int_compare(IntPredicate::NE, l, r, "ne").unwrap().into()),
+                BinaryOperator::Less => {
+                    let pred = if is_signed { IntPredicate::SLT } else { IntPredicate::ULT };
+                    Ok(self.builder.build_int_compare(pred, l, r, "lt").unwrap().into())
+                }
+                BinaryOperator::LessEqual => {
+                    let pred = if is_signed { IntPredicate::SLE } else { IntPredicate::ULE };
+                    Ok(self.builder.build_int_compare(pred, l, r, "le").unwrap().into())
+                }
+                BinaryOperator::Greater => {
+                    let pred = if is_signed { IntPredicate::SGT } else { IntPredicate::UGT };
+                    Ok(self.builder.build_int_compare(pred, l, r, "gt").unwrap().into())
+                }
+                BinaryOperator::GreaterEqual => {
+                    let pred = if is_signed { IntPredicate::SGE } else { IntPredicate::UGE };
+                    Ok(self.builder.build_int_compare(pred, l, r, "ge").unwrap().into())
+                }
+
+                _ => Err(format!("Binary op {:?} not supported for integer", op)),
+            };
+        }
+
+        Err("Operands type mismatch or unsupported type for binary op".into())
     }
 
     fn compile_float_binary(
@@ -1598,6 +1563,126 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
         // 6. 注册到符号表
         self.variables.insert(id, global.as_pointer_value());
+    }
+
+    // 辅助函数：编译 sizeof
+    fn compile_sizeof(&self, target_type: &Type) -> Result<BasicValueEnum<'ctx>, String> {
+        // 1. 从 Analyzer 获取类型键
+        let type_key = self.analyzer.types.get(&target_type.id)
+            .ok_or_else(|| format!("Sizeof target type {:?} not resolved by analyzer", target_type))?;
+
+        // 2. 编译为 LLVM Type
+        let llvm_ty = self.compile_type(type_key)
+            .ok_or_else(|| format!("Cannot compile type {:?} for sizeof", type_key))?;
+
+        // 3. 获取大小 (LLVM ConstantExpr)
+        // size_of() 返回的是一个 IntValue (通常是 i64)，代表字节数
+        match llvm_ty.size_of() {
+            Some(size_val) => Ok(size_val.as_basic_value_enum()),
+            None => Err("Type does not have a determinable size (e.g. void)".into())
+        }
+    }
+
+    fn compile_pointer_binary(
+        &self,
+        l_ptr: PointerValue<'ctx>,
+        op: BinaryOperator,
+        rhs_val: BasicValueEnum<'ctx>,
+        lhs_type_key: &TypeKey, // 需要类型信息来做指针加减
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match op {
+            // === 指针比较 (Ptr == Ptr) ===
+            // 支持 curr != NULL_NODE
+            BinaryOperator::Equal | BinaryOperator::NotEqual => {
+                if !rhs_val.is_pointer_value() {
+                    return Err("Cannot compare pointer with non-pointer".into());
+                }
+                let r_ptr = rhs_val.into_pointer_value();
+
+                // 将指针转为整数 (i64/usize) 进行比较
+                let i64_type = self.context.i64_type();
+                let l_int = self.builder.build_ptr_to_int(l_ptr, i64_type, "lhs_p2i").unwrap();
+                let r_int = self.builder.build_ptr_to_int(r_ptr, i64_type, "rhs_p2i").unwrap();
+
+                let pred = match op {
+                    BinaryOperator::Equal => IntPredicate::EQ,
+                    BinaryOperator::NotEqual => IntPredicate::NE,
+                    _ => unreachable!(),
+                };
+
+                Ok(self
+                    .builder
+                    .build_int_compare(pred, l_int, r_int, "ptr_cmp")
+                    .unwrap()
+                    .into())
+            }
+
+            // === 指针加法 (Ptr + Int) ===
+            // 支持 ptr = ptr + 1 (移动 sizeof(T))
+            BinaryOperator::Add => {
+                if !rhs_val.is_int_value() {
+                    return Err("Pointer arithmetic requires integer RHS".into());
+                }
+                let r_int = rhs_val.into_int_value();
+
+                // 1. 获取指针指向的类型 (Pointee Type)
+                let pointee_type = match lhs_type_key {
+                    TypeKey::Pointer(inner, _) => self.compile_type(inner),
+                    TypeKey::Array(inner, _) => self.compile_type(inner), 
+                    _ => return Err(format!("LHS is not a pointer/array type: {:?}", lhs_type_key)),
+                }.ok_or("Failed to compile pointee type for arithmetic")?;
+
+                // 2. 生成 GEP (GetElementPtr)
+                // LLVM 的 GEP 强类型：ptr + N 意味着内存地址增加 N * sizeof(pointee_type)
+                let new_ptr = unsafe {
+                    self.builder.build_gep(
+                        pointee_type, 
+                        l_ptr,
+                        &[r_int],     
+                        "ptr_add"
+                    ).map_err(|_| "GEP failed")?
+                };
+                
+                Ok(new_ptr.as_basic_value_enum())
+            }
+
+            // === 指针减法 ===
+            BinaryOperator::Subtract => {
+                if rhs_val.is_int_value() {
+                    // Case A: Ptr - Int => Ptr + (-Int)
+                    let r_int = rhs_val.into_int_value();
+                    let neg_r = self.builder.build_int_neg(r_int, "neg_offset").unwrap();
+                    
+                    let pointee_type = match lhs_type_key {
+                        TypeKey::Pointer(inner, _) => self.compile_type(inner),
+                        TypeKey::Array(inner, _) => self.compile_type(inner),
+                        _ => return Err("Not a pointer".into()),
+                    }.unwrap();
+
+                    let new_ptr = unsafe {
+                        self.builder.build_gep(pointee_type, l_ptr, &[neg_r], "ptr_sub").unwrap()
+                    };
+                    Ok(new_ptr.as_basic_value_enum())
+
+                } else if rhs_val.is_pointer_value() {
+                    // Case B: Ptr - Ptr -> Int (两个指针的距离)
+                    // 返回的是元素个数 (i64)，不是字节数
+                    let r_ptr = rhs_val.into_pointer_value();
+                    
+                    let pointee_type = match lhs_type_key {
+                        TypeKey::Pointer(inner, _) => self.compile_type(inner),
+                        _ => return Err("Ptr diff need pointer".into()),
+                    }.unwrap();
+
+                    let diff = self.builder.build_ptr_diff(pointee_type, l_ptr, r_ptr, "diff").unwrap();
+                    Ok(diff.into())
+                } else {
+                    Err("Invalid type for pointer sub".into())
+                }
+            }
+
+            _ => Err(format!("Binary op {:?} not supported for pointers", op)),
+        }
     }
 
     // 判断是否是整数类 (包括 Bool, Char, Unit)

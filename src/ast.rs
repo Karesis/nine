@@ -133,8 +133,24 @@ pub enum PrimitiveType {
     F32,
     F64,
     Bool,
-    // 可能还需要一个 Void/Unit，虽然 EBNF 没显式写，但函数没返回值时需要
+    // 内部用于分析和与llvm交互用的占位类型
     Unit,
+}
+
+impl PrimitiveType {
+    pub fn width_bytes(&self) -> u64 {
+        use PrimitiveType::*;
+        match self {
+            I8 | U8 | Bool => 1,
+            I16 | U16 => 2,
+            I32 | U32 | F32 => 4,
+            I64 | U64 | F64 => 8,
+            // 假设 64 位系统
+            //? TODO: 支持配置
+            ISize | USize => 8, 
+            Unit => 0,
+        }
+    }
 }
 
 /// ======================================================
@@ -217,6 +233,9 @@ pub enum ExpressionKind {
         target: Box<Expression>, // 这里的 target 可能是个 Path，也可能是个复杂表达式
         member: Identifier,
     },
+
+    // 内置函数 @sizeof(T)
+    SizeOf(Type),
 }
 
 #[derive(Debug, Clone)]

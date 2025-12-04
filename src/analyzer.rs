@@ -13,7 +13,6 @@
 //    limitations under the License.
 
 use crate::ast::*;
-use crate::diagnostic::Diagnosable;
 use crate::source::Span;
 use std::collections::HashMap;
 
@@ -1271,6 +1270,17 @@ impl Analyzer {
                 // Cast 表达式的类型就是目标类型
                 target_ty
             }
+
+            ExpressionKind::SizeOf(target_type) => {
+                // 1. 解析内部类型
+                let key = self.resolve_ast_type(target_type);
+                
+                // 2. 将解析出的 TypeKey 记录到 Context 中
+                self.record_type(target_type.id, key);
+                
+                // 3. 返回类型为 u64 (usize)
+                TypeKey::Primitive(PrimitiveType::U64)
+            }
         };
 
         self.record_type(expr.id, ty.clone());
@@ -1567,7 +1577,7 @@ impl Analyzer {
     /// 尝试计算编译时常量表达式
     /// 如果计算成功，返回 Some(u64)
     /// 如果包含无法在编译期确定的内容（如函数调用、变量），返回 None
-    fn eval_constant_expr(&self, expr: &Expression) -> Option<u64> {
+    fn eval_constant_expr(&mut self, expr: &Expression) -> Option<u64> {
         match &expr.kind {
             // 1. 字面量
             ExpressionKind::Literal(Literal::Integer(val)) => Some(*val),
@@ -1624,6 +1634,17 @@ impl Analyzer {
                 Some((-(val as i64)) as u64)
             }
 
+            ExpressionKind::SizeOf(target_type) => {
+                // 尝试获取类型的静态大小
+                let key = if let Some(k) = self.ctx.types.get(&target_type.id) {
+                    k.clone()
+                } else {
+                    self.resolve_ast_type(target_type)
+                };
+
+                self.get_type_static_size(&key)
+            },
+
             ExpressionKind::Cast { expr: src_expr, .. } => {
                 let val = self.eval_constant_expr(src_expr)?;
 
@@ -1656,6 +1677,28 @@ impl Analyzer {
 
             // 其他情况（函数调用等）不是常量
             //? 更完善的constexpr?
+            _ => None,
+        }
+    }
+
+    /// 尝试在语义分析阶段计算类型大小
+    /// 返回 None 表示该类型的大小依赖后端 Layout (如 Struct)，无法在 Analyzer 阶段确定
+    fn get_type_static_size(&self, key: &TypeKey) -> Option<u64> {
+        match key {
+            TypeKey::Primitive(p) => Some(p.width_bytes()),
+            
+            // 指针固定 8 字节 (假设 64 位目标机器)
+            //? TODO: 支持跨平台编译，要 TargetConfig
+            TypeKey::Pointer(..) | TypeKey::Function { .. } => Some(8),
+            
+            // 数组：递归计算 inner_size * count
+            TypeKey::Array(inner, size) => {
+                let inner_size = self.get_type_static_size(inner)?;
+                Some(inner_size * size)
+            }
+            //? TODO: 支持 const X = @sizeof(MyStruct);
+            TypeKey::Named(_) => None,
+            
             _ => None,
         }
     }

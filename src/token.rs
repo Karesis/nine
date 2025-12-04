@@ -130,7 +130,10 @@ define_tokens! {
         "ret"      => Ret,
         "switch"   => Switch,
         "default"  => Default,
-        "for"      => For // imp for ...
+        "for"      => For, // imp for ...
+
+        // 内置函数
+        "sizeof" => SizeOf,
     }
 
     symbols {
@@ -172,5 +175,6 @@ define_tokens! {
         "->" => Arrow,
         "|"  => Pipe,        // 用于 switch case 模式多选
         "..." => DotDotDot, // ...
+        "@" => At,
     }
 }
