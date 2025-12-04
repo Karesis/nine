@@ -1389,10 +1389,6 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
 
         // 3. “间接调用” (Indirect Call) - 函数指针
-        // 如果走到这里，说明 callee 是一个表达式（比如变量、数组元素、返回函数指针的函数调用等）
-        //? TODO: 设计语法支持间接调用?
-        //? TODO: 闭包?
-
         // A. 编译表达式得到函数指针 (PointerValue)
         let fn_ptr_val = self.compile_expr(callee)?.into_pointer_value();
 
@@ -1606,7 +1602,6 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             {
                 let src_float = src_val.into_float_value();
                 let target_float_ty = target_llvm_ty.into_float_type();
-                //? Inkwell build_float_cast 会自动处理 Ext/Trunc?
                 Ok(self
                     .builder
                     .build_float_cast(src_float, target_float_ty, "fpcast")
@@ -1725,62 +1720,68 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let llvm_ty = self.compile_type(ty_key).unwrap();
 
         // 2. 获取修饰名
-        let name = self
-            .analyzer
-            .mangled_names
-            .get(&id)
-            .cloned()
-            .unwrap_or(def.name.name.clone());
+        // 如果是 extern，不做 mangle，且不设置 initializer
+        let name = if def.is_extern {
+            def.name.name.clone()
+        } else {
+            self.analyzer.mangled_names.get(&id).cloned().unwrap_or(def.name.name.clone())
+        };
 
         // 3. 创建全局变量
         let global = self
             .module
             .add_global(llvm_ty, Some(AddressSpace::default()), &name);
 
-        // 4. 设置可变性 (LLVM IR 里的 constant 意味着只读)
-        global.set_constant(def.modifier == Mutability::Constant);
+        if def.is_extern {
+            // Extern 变量：声明 linkage 为 External，不设置 initializer
+            global.set_linkage(Linkage::External);
+            // 不设置 initializer
+        } else {
+            // 4. 设置可变性 (LLVM IR 里的 constant 意味着只读)
+            global.set_constant(def.modifier == Mutability::Constant);
 
-        // 5. 设置初始化值
-        if let Some(init) = &def.initializer {
-            // A: 如果是简单字面量 (String, Float, Bool)，直接编译
-            if let ExpressionKind::Literal(lit) = &init.kind {
-                let lit_ty = self.analyzer.types.get(&init.id).unwrap();
-                let val = self
-                    .compile_literal(lit, lit_ty)
-                    .expect("Literal compile failed");
-                global.set_initializer(&val);
-            }
-            // B: 如果 Analyzer 已经计算出了整数值 (Int 运算和 指针强转)
-            else if let Some(&const_val) = self.analyzer.constants.get(&id) {
-                if llvm_ty.is_int_type() {
-                    // 情况 1: 整数类型 (i32, u64...)
-                    let int_ty = llvm_ty.into_int_type();
-                    // 视为无符号处理raw bits
-                    let val = int_ty.const_int(const_val, false);
-                    global.set_initializer(&val.as_basic_value_enum());
-                } else if llvm_ty.is_pointer_type() {
-                    // 情况 2: 指针类型 (e.g., 0xB8000 as *u16)
-                    let i64_ty = self.context.i64_type();
-                    let int_val = i64_ty.const_int(const_val, false);
+            // 5. 设置初始化值
+            if let Some(init) = &def.initializer {
+                // A: 如果是简单字面量 (String, Float, Bool)，直接编译
+                if let ExpressionKind::Literal(lit) = &init.kind {
+                    let lit_ty = self.analyzer.types.get(&init.id).unwrap();
+                    let val = self
+                        .compile_literal(lit, lit_ty)
+                        .expect("Literal compile failed");
+                    global.set_initializer(&val);
+                }
+                // B: 如果 Analyzer 已经计算出了整数值 (Int 运算和 指针强转)
+                else if let Some(&const_val) = self.analyzer.constants.get(&id) {
+                    if llvm_ty.is_int_type() {
+                        // 情况 1: 整数类型 (i32, u64...)
+                        let int_ty = llvm_ty.into_int_type();
+                        // 视为无符号处理raw bits
+                        let val = int_ty.const_int(const_val, false);
+                        global.set_initializer(&val.as_basic_value_enum());
+                    } else if llvm_ty.is_pointer_type() {
+                        // 情况 2: 指针类型 (e.g., 0xB8000 as *u16)
+                        let i64_ty = self.context.i64_type();
+                        let int_val = i64_ty.const_int(const_val, false);
 
-                    let ptr_val = int_val.const_to_pointer(llvm_ty.into_pointer_type());
-                    global.set_initializer(&ptr_val.as_basic_value_enum());
+                        let ptr_val = int_val.const_to_pointer(llvm_ty.into_pointer_type());
+                        global.set_initializer(&ptr_val.as_basic_value_enum());
+                    } else {
+                        // 其他类型暂不支持计算初始化 (比如 Struct 常量，需要 const struct builder)
+                        //?: TODO: 支持更多的计算初始化
+                        panic!(
+                            "Global variable has computed value but type {:?} is not supported for auto-init yet",
+                            llvm_ty
+                        );
+                    }
                 } else {
-                    // 其他类型暂不支持计算初始化 (比如 Struct 常量，需要 const struct builder)
-                    //?: TODO: 支持更多的计算初始化
                     panic!(
-                        "Global variable has computed value but type {:?} is not supported for auto-init yet",
-                        llvm_ty
+                        "Global initializer is too complex (not a literal, and analyzer couldn't eval it)."
                     );
                 }
             } else {
-                panic!(
-                    "Global initializer is too complex (not a literal, and analyzer couldn't eval it)."
-                );
+                // 如果没有初始化值，设置为 Zero Initializer (.bss)
+                global.set_initializer(&llvm_ty.const_zero());
             }
-        } else {
-            // 如果没有初始化值，设置为 Zero Initializer (.bss)
-            global.set_initializer(&llvm_ty.const_zero());
         }
 
         // 6. 注册到符号表

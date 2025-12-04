@@ -395,6 +395,7 @@ pub struct GlobalDefinition {
     pub modifier: Mutability, // Mutable, Immutable(Set), Constant
     pub initializer: Option<Expression>,
     pub span: Span,
+    pub is_extern: bool,
 }
 
 #[derive(Debug, Clone)]

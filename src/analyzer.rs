@@ -594,13 +594,40 @@ impl Analyzer {
     fn check_int_range(&self, p: PrimitiveType, val: u64) -> bool {
         use PrimitiveType::*;
         match p {
+            // === 固定宽度类型 ===
             U8 => val <= u8::MAX as u64,
-            I8 => val <= i8::MAX as u64, //? TODO: 未处理负数??处理了吗？
+            I8 => val <= (i8::MAX as u64) + 1,   // 允许 abs(MIN) 即 128
+            
             U16 => val <= u16::MAX as u64,
-            I16 => val <= i16::MAX as u64,
+            I16 => val <= (i16::MAX as u64) + 1, // 允许 32768
+            
             U32 => val <= u32::MAX as u64,
-            I32 => val <= i32::MAX as u64,
-            // 64位及size默认放行
+            I32 => val <= (i32::MAX as u64) + 1, // 允许 2147483648
+            
+            U64 => true, // val 是 u64，永远不会超过 u64
+            I64 => val <= (i64::MAX as u64) + 1, // 允许 abs(i64::MIN)
+
+            // === 平台相关类型 (Target Dependent) ===
+            USize => {
+                if self.ctx.target.ptr_byte_width == 4 {
+                    // 32位平台: 不能超过 u32::MAX
+                    val <= u32::MAX as u64
+                } else {
+                    // 64位平台: u64 范围内都行
+                    true 
+                }
+            }
+            ISize => {
+                if self.ctx.target.ptr_byte_width == 4 {
+                    // 32位平台: 不能超过 abs(i32::MIN)
+                    val <= (i32::MAX as u64) + 1
+                } else {
+                    // 64位平台: 不能超过 abs(i64::MIN)
+                    val <= (i64::MAX as u64) + 1
+                }
+            }
+
+            // 其他非整数类型
             _ => true,
         }
     }
@@ -1371,12 +1398,6 @@ impl Analyzer {
                         expr.span,
                     );
                 }
-
-                //? TODO: 4. 固化字面量(优化)
-                //? 如果是 10 as u8，我们可以顺手把 10 固化为 u8，减少 Codegen 的 cast 指令
-                //? 但 LLVM 优化器也会做这件事?
-                //? self.coerce_literal_type(src_expr.id, &target_ty, &src_ty);
-
                 // Cast 表达式的类型就是目标类型
                 target_ty
             }
@@ -1687,7 +1708,9 @@ impl Analyzer {
                 path.segments.last().unwrap().name.clone()
             }
             TypeKind::Pointer { inner, .. } => self.get_mangling_type_name(inner),
-            TypeKind::Array { inner, .. } => format!("Arr_{}", self.get_mangling_type_name(inner)), //? 更“安全”的处理方式？
+            TypeKind::Array { inner, size } => {
+                format!("Arr_{}_{}", size, self.get_mangling_type_name(inner))
+            },
             TypeKind::Primitive(p) => format!("{:?}", p), // e.g. "I32"
             _ => "Unknown".to_string(),
         }
