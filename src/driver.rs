@@ -43,12 +43,9 @@ impl Driver {
         let mut parser = Parser::new(&src, lexer, base_offset, &mut self.global_node_id);
         let mut program = parser.parse_program();
 
-        // 【修改 3】核心改动：不要返回 Err，而是把错误存起来
         if !parser.errors.is_empty() {
             // 将 parser 里的错误转移到 driver 里
             self.parse_errors.extend(parser.errors);
-            // 这里不 return Err，因为 parser 有同步机制，生成的 AST 可能部分可用
-            // 我们继续尝试解析子模块，以便一次性报出更多错误
         }
 
         // === 3. 计算子模块查找路径 (保持原逻辑) ===

@@ -2,21 +2,27 @@ use crate::driver::Driver;
 use crate::source::{SourceFile, Span};
 use std::cmp;
 
-/// 定义一个通用的错误特征，让 Parser 和 Analyzer 的错误都能通过它打印
 pub trait Diagnosable {
     fn span(&self) -> Span;
     fn message(&self) -> &str;
-    // 可以在这里加 help_message() 等
 }
 
-// 适配你现有的 ParseError
 use crate::parser::ParseError;
 impl Diagnosable for ParseError {
     fn span(&self) -> Span { self.span }
     fn message(&self) -> &str { &self.message }
 }
 
-/// 核心打印函数
+use crate::analyzer::AnalyzeError;
+impl Diagnosable for AnalyzeError {
+    fn span(&self) -> Span {
+        self.span
+    }
+    fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 pub fn emit_diagnostics<E: Diagnosable>(driver: &Driver, errors: &[E]) {
     for err in errors {
         print_one_error(driver, err);
@@ -31,7 +37,7 @@ fn print_one_error<E: Diagnosable>(driver: &Driver, err: &E) {
     // lookup_source 返回 (SourceFile引用, 行号1-based, 列号1-based)
     let location = driver.source_manager.lookup_source(span);
 
-    // 颜色代码 (ANSI Escape Codes)
+    // 颜色代码 
     let color_red = "\x1b[31;1m";
     let color_blue = "\x1b[34;1m";
     let color_reset = "\x1b[0m";
@@ -47,7 +53,6 @@ fn print_one_error<E: Diagnosable>(driver: &Driver, err: &E) {
         );
 
         // 2. 获取源码行内容
-        // 我们需要利用 file.line_starts 来切片，不可以用 lines() 迭代器，否则性能浪费且不好定位
         if let Some(line_str) = get_line_slice(file, line_num) {
             let line_num_str = line_num.to_string();
             let padding = " ".repeat(line_num_str.len());
@@ -56,7 +61,6 @@ fn print_one_error<E: Diagnosable>(driver: &Driver, err: &E) {
             eprintln!("  {} {} |{}", color_blue, padding, color_reset);
 
             // 源码行: "10 |     let x = 1;"
-            // 注意：需要处理 Tab，将 Tab 替换为空格，保持视觉对齐
             let (safe_line, col_offset_fix) = sanitize_line(line_str, col_num);
             eprintln!("  {} {} |{} {}", color_blue, line_num_str, color_reset, safe_line);
 
@@ -69,9 +73,6 @@ fn print_one_error<E: Diagnosable>(driver: &Driver, err: &E) {
             eprint!("{}", spaces);
 
             // 计算波浪线长度
-            // Span 长度 = end - start
-            // 如果 span 跨行了，我们只在当前行画到行尾
-            // 这里做一个简单的处理：只画 start 所在行的那一部分
             let raw_len = span.end.saturating_sub(span.start);
             let line_remain_len = line_str.len().saturating_sub(col_num - 1);
             let draw_len = cmp::max(1, cmp::min(raw_len, line_remain_len));
@@ -113,8 +114,6 @@ fn get_line_slice(file: &SourceFile, line_1based: usize) -> Option<&str> {
 }
 
 /// 辅助函数：处理 Tab 字符
-/// 终端里的 \t 显示宽度不确定，通常是8，但光标计算认为是1。
-/// 我们把 \t 替换成 4个空格，并计算偏移量修正值。
 fn sanitize_line(raw: &str, target_col: usize) -> (String, usize) {
     let mut result = String::new();
     let mut offset_fix = 0;
@@ -123,7 +122,7 @@ fn sanitize_line(raw: &str, target_col: usize) -> (String, usize) {
     for (i, c) in raw.chars().enumerate() {
         if c == '\t' {
             result.push_str("    "); // 4空格
-            // 如果这个 tab 在报错点之前，我们需要让下划线右移 3 格 (4-1)
+            // 如果这个 tab 在报错点之前，让下划线右移 3 格 (4-1)
             if i < target_col - 1 {
                 offset_fix += 3;
             }

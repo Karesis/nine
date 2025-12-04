@@ -1,4 +1,3 @@
-// src/main.rs
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use std::process::exit;

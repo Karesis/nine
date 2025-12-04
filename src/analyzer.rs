@@ -97,15 +97,6 @@ pub struct AnalyzeError {
     pub span: Span,
 }
 
-impl Diagnosable for AnalyzeError {
-    fn span(&self) -> Span {
-        self.span
-    }
-    fn message(&self) -> &str {
-        &self.message
-    }
-}
-
 /// ======================================================
 /// 3. Analyzer 主逻辑
 /// ======================================================
