@@ -1,9 +1,22 @@
-// src/driver.rs
-use std::path::{Path, PathBuf};
-use crate::source::{SourceManager, FileId};
-use crate::parser::{Parser, ParseError};
-use crate::lexer::Lexer;
+//    Copyright 2025 Karesis
+//
+//    Licensed under the Apache License, Version 2.0 (the "License");
+//    you may not use this file except in compliance with the License.
+//    You may obtain a copy of the License at
+//
+//        http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing, software
+//    distributed under the License is distributed on an "AS IS" BASIS,
+//    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//    See the License for the specific language governing permissions and
+//    limitations under the License.
+
 use crate::ast::{ItemKind, Program};
+use crate::lexer::Lexer;
+use crate::parser::{ParseError, Parser};
+use crate::source::{FileId, SourceManager};
+use std::path::{Path, PathBuf};
 
 pub struct Driver {
     pub source_manager: SourceManager,
@@ -13,17 +26,23 @@ pub struct Driver {
 
 impl Driver {
     pub fn new() -> Self {
-        Self { source_manager: SourceManager::new(), global_node_id: 0, parse_errors: Vec::new(),}
+        Self {
+            source_manager: SourceManager::new(),
+            global_node_id: 0,
+            parse_errors: Vec::new(),
+        }
     }
 
-   /// 入口：编译项目
+    /// 入口：编译项目
     pub fn compile_project(&mut self, entry_path: PathBuf) -> Result<Program, String> {
-        let abs_entry = std::fs::canonicalize(&entry_path)
-            .map_err(|e| format!("Invalid entry path: {}", e))?;
+        let abs_entry =
+            std::fs::canonicalize(&entry_path).map_err(|e| format!("Invalid entry path: {}", e))?;
 
-        let root_id = self.source_manager.load_file(&abs_entry)
+        let root_id = self
+            .source_manager
+            .load_file(&abs_entry)
             .map_err(|e| format!("Cannot load root file: {}", e))?;
-        
+
         // 每次编译前清空错误
         self.parse_errors.clear();
 
@@ -37,7 +56,7 @@ impl Driver {
         let src = file.src.clone();
         let base_offset = file.start_pos;
         let current_file_path = file.path.clone();
-        
+
         // 2. Parse
         let lexer = Lexer::new(&src);
         let mut parser = Parser::new(&src, lexer, base_offset, &mut self.global_node_id);
@@ -63,10 +82,12 @@ impl Driver {
         // 4. 遍历 AST，加载 ModuleDecl
         for item in &mut program.items {
             if let ItemKind::ModuleDecl { name, items, .. } = &mut item.kind {
-                if items.is_some() { continue; } 
+                if items.is_some() {
+                    continue;
+                }
 
                 let mod_name = &name.name;
-                
+
                 // 查找策略
                 let path_sibling = search_dir.join(format!("{}.9", mod_name));
                 let path_entry = search_dir.join(mod_name).join("entry.9");
@@ -77,14 +98,16 @@ impl Driver {
                     path_entry
                 } else {
                     return Err(format!(
-                        "Module '{}' not found at {:?} (span: {:?})", 
+                        "Module '{}' not found at {:?} (span: {:?})",
                         mod_name, search_dir, name.span
                     ));
                 };
 
-                let sub_id = self.source_manager.load_file(&target_path)
+                let sub_id = self
+                    .source_manager
+                    .load_file(&target_path)
                     .map_err(|e| format!("Failed to load module {}: {}", mod_name, e))?;
-                
+
                 // 递归
                 let sub_program = self.parse_module(sub_id, false)?;
                 *items = Some(sub_program.items);

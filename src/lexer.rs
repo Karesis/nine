@@ -1,3 +1,17 @@
+//    Copyright 2025 Karesis
+//
+//    Licensed under the Apache License, Version 2.0 (the "License");
+//    you may not use this file except in compliance with the License.
+//    You may obtain a copy of the License at
+//
+//        http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing, software
+//    distributed under the License is distributed on an "AS IS" BASIS,
+//    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//    See the License for the specific language governing permissions and
+//    limitations under the License.
+
 use crate::token::{Token, TokenKind};
 
 pub struct Lexer<'a> {
@@ -203,7 +217,7 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        // 2. 普通十进制扫描 
+        // 2. 普通十进制扫描
         // 如果是 0xB8...，上面的分支会返回，不会走到这里
         // 如果是 123，会走到这里
         while let Some(&c) = self.chars.peek() {
@@ -217,7 +231,7 @@ impl<'a> Lexer<'a> {
         // 3. 扫描小数部分
         if let Some(&'.') = self.chars.peek() {
             let mut iter_clone = self.chars.clone();
-            iter_clone.next(); 
+            iter_clone.next();
             if let Some(next_c) = iter_clone.next() {
                 if next_c.is_ascii_digit() {
                     self.advance(); // .

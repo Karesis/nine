@@ -1,30 +1,44 @@
-use std::collections::HashMap;
+//    Copyright 2025 Karesis
+//
+//    Licensed under the Apache License, Version 2.0 (the "License");
+//    you may not use this file except in compliance with the License.
+//    You may obtain a copy of the License at
+//
+//        http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing, software
+//    distributed under the License is distributed on an "AS IS" BASIS,
+//    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//    See the License for the specific language governing permissions and
+//    limitations under the License.
+
 use crate::ast::*;
-use crate::source::Span;
 use crate::diagnostic::Diagnosable;
+use crate::source::Span;
+use std::collections::HashMap;
 
 /// 定义 ID：指向 AST 中的节点
 pub type DefId = NodeId;
 
 /// ======================================================
-/// 语义类型键 
+/// 语义类型键
 /// ======================================================
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeKey {
     Primitive(PrimitiveType),
-    Named(DefId), 
+    Named(DefId),
     Pointer(Box<TypeKey>, Mutability),
     Array(Box<TypeKey>, u64),
     Function {
         params: Vec<TypeKey>,
         ret: Option<Box<TypeKey>>,
-        is_variadic: bool
+        is_variadic: bool,
     },
     /// 未定类型的整数字面量
     IntegerLiteral(u64),
     /// 浮点字面量: 存 f64 的 to_bits()
     FloatLiteral(u64),
-    Error, 
+    Error,
 }
 
 /// ======================================================
@@ -35,11 +49,11 @@ pub enum TypeKey {
 pub enum ScopeKind {
     Block,
     Function,
-    Module, 
+    Module,
     Loop,
 }
 
-#[derive(Debug, Clone)] 
+#[derive(Debug, Clone)]
 pub struct Scope {
     pub kind: ScopeKind,
     pub symbols: HashMap<String, DefId>,
@@ -47,14 +61,17 @@ pub struct Scope {
 
 impl Scope {
     pub fn new(kind: ScopeKind) -> Self {
-        Self { kind, symbols: HashMap::new() }
+        Self {
+            kind,
+            symbols: HashMap::new(),
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct MethodInfo {
     pub name: String,
-    pub def_id: DefId, 
+    pub def_id: DefId,
     pub is_pub: bool,
     pub span: Span,
 }
@@ -139,44 +156,48 @@ impl Analyzer {
 
         // Pass 3: 签名解析
         self.resolve_signatures(&program.items);
-        
+
         // Pass 4: 函数体检查
         self.check_bodies(&program.items);
     }
 
     /// ==================================================
-    /// Phase 1: 声明扫描 
+    /// Phase 1: 声明扫描
     /// ==================================================
     fn scan_declarations(&mut self, items: &[Item]) {
         for item in items {
             match &item.kind {
                 // --- 模块 ---
-                ItemKind::ModuleDecl { name, items: sub_items, .. } => {
+                ItemKind::ModuleDecl {
+                    name,
+                    items: sub_items,
+                    ..
+                } => {
                     self.define_symbol(name.name.clone(), item.id, name.span);
                     self.record_type(item.id, TypeKey::Named(item.id));
 
                     if let Some(subs) = sub_items {
                         self.enter_scope(ScopeKind::Module);
-                        
+
                         // 压入路径栈
                         self.module_path.push(name.name.clone());
-                        
-                        self.scan_declarations(subs); 
-                        
+
+                        self.scan_declarations(subs);
+
                         // 弹出路径栈
                         self.module_path.pop();
-                        
+
                         let module_scope = self.exit_scope();
                         self.ctx.namespace_scopes.insert(item.id, module_scope);
                     }
                 }
-                
+
                 // --- 结构体 ---
                 ItemKind::StructDecl(def) => {
                     self.define_symbol(def.name.name.clone(), item.id, def.name.span);
                     // 【新增】给结构体名注册类型，支持 Struct::new()
                     self.record_type(item.id, TypeKey::Named(item.id));
-                    
+
                     self.register_static_methods(item.id, &def.static_methods);
                 }
 
@@ -185,7 +206,7 @@ impl Analyzer {
                     self.define_symbol(def.name.name.clone(), item.id, def.name.span);
                     // 【新增】
                     self.record_type(item.id, TypeKey::Named(item.id));
-                    
+
                     self.register_static_methods(item.id, &def.static_methods);
                 }
 
@@ -195,30 +216,37 @@ impl Analyzer {
                     self.record_type(item.id, TypeKey::Named(item.id));
                     let mut enum_scope = Scope::new(ScopeKind::Module);
                     for variant in &def.variants {
-                        enum_scope.symbols.insert(variant.name.name.clone(), variant.id);
+                        enum_scope
+                            .symbols
+                            .insert(variant.name.name.clone(), variant.id);
                     }
                     // 静态方法处理
                     for method in &def.static_methods {
                         if enum_scope.symbols.contains_key(&method.name.name) {
-                            self.error(format!("Duplicate name '{}' in enum", method.name.name), method.span);
+                            self.error(
+                                format!("Duplicate name '{}' in enum", method.name.name),
+                                method.span,
+                            );
                         } else {
-                            enum_scope.symbols.insert(method.name.name.clone(), method.id);
+                            enum_scope
+                                .symbols
+                                .insert(method.name.name.clone(), method.id);
                         }
                     }
                     self.ctx.namespace_scopes.insert(item.id, enum_scope);
                 }
 
                 // --- 函数 / 类型别名 ---
-               ItemKind::FunctionDecl(def) => {
+                ItemKind::FunctionDecl(def) => {
                     self.define_symbol(def.name.name.clone(), def.id, def.name.span);
-                    
+
                     // 如果是 extern，直接用原名；否则加模块前缀
                     let mangled = if def.is_extern {
                         def.name.name.clone() // "printf" -> "printf"
                     } else {
                         self.generate_mangled_name(&def.name.name) // "add" -> "math_add"
                     };
-                    
+
                     self.ctx.mangled_names.insert(def.id, mangled);
                 }
 
@@ -229,52 +257,61 @@ impl Analyzer {
                 ItemKind::GlobalVariable(def) => {
                     // 1. 注册符号
                     self.define_symbol(def.name.name.clone(), item.id, def.name.span);
-                    
-                    // 2. 注册修饰名 
+
+                    // 2. 注册修饰名
                     let mangled = self.generate_mangled_name(&def.name.name);
                     self.ctx.mangled_names.insert(item.id, mangled);
-                    
+
                     // 3. 记录可变性 (供 get_expr_mutability 使用)
                     self.ctx.mutabilities.insert(item.id, def.modifier);
                 }
 
-                _ => {} 
+                _ => {}
             }
         }
     }
 
-    // 辅助函数：注册静态方法 
+    // 辅助函数：注册静态方法
     fn register_static_methods(&mut self, item_id: DefId, methods: &[FunctionDefinition]) {
         let mut static_scope = Scope::new(ScopeKind::Module);
         for method in methods {
             if static_scope.symbols.contains_key(&method.name.name) {
-                    self.error(format!("Duplicate static method '{}'", method.name.name), method.span);
+                self.error(
+                    format!("Duplicate static method '{}'", method.name.name),
+                    method.span,
+                );
             } else {
-                    static_scope.symbols.insert(method.name.name.clone(), method.id);
+                static_scope
+                    .symbols
+                    .insert(method.name.name.clone(), method.id);
             }
         }
         self.ctx.namespace_scopes.insert(item_id, static_scope);
     }
 
     /// ==================================================
-    /// Phase 2: 实现扫描 
+    /// Phase 2: 实现扫描
     /// ==================================================
     fn scan_implementations(&mut self, items: &[Item]) {
         for item in items {
-             match &item.kind {
-                ItemKind::ModuleDecl { name, items: sub_items, .. } => {
+            match &item.kind {
+                ItemKind::ModuleDecl {
+                    name,
+                    items: sub_items,
+                    ..
+                } => {
                     if let Some(subs) = sub_items {
                         if let Some(scope) = self.ctx.namespace_scopes.get(&item.id) {
                             self.scopes.push(scope.clone());
-                            
+
                             // 压入模块路径
                             self.module_path.push(name.name.clone());
-                            
+
                             self.scan_implementations(subs);
-                            
+
                             // 弹出模块路径
                             self.module_path.pop();
-                            
+
                             self.scopes.pop();
                         }
                     }
@@ -288,7 +325,7 @@ impl Analyzer {
                         self.ctx.mangled_names.insert(m.id, mangled);
                     }
                 }
-                
+
                 ItemKind::EnumDecl(def) => {
                     let type_name = &def.name.name;
                     for m in &def.static_methods {
@@ -298,66 +335,78 @@ impl Analyzer {
                     }
                 }
 
-                ItemKind::Implementation { target_type, methods } => {
+                ItemKind::Implementation {
+                    target_type,
+                    methods,
+                } => {
                     // 1. 计算 Key
                     let key = self.resolve_ast_type(target_type);
-                    if let TypeKey::Error = key { continue; }
+                    if let TypeKey::Error = key {
+                        continue;
+                    }
 
                     // 2. 生成修饰名并注册
                     let type_name = self.get_mangling_type_name(target_type);
-                    
+
                     for method in methods {
                         // 格式：StructName_MethodName
                         // generate_mangled_name 会自动加上模块前缀：Module_StructName_MethodName
                         let combined_name = format!("{}_{}", type_name, method.name.name);
                         let mangled = self.generate_mangled_name(&combined_name);
-                        
+
                         // 注册到 mangled_names 表，供 Codegen 使用
                         self.ctx.mangled_names.insert(method.id, mangled);
                     }
 
                     // 2. 取出当前的注册表（clone）
                     // 此时 self 的借用立即结束
-                    let mut local_registry = self.ctx.method_registry
+                    let mut local_registry = self
+                        .ctx
+                        .method_registry
                         .get(&key)
                         .cloned()
                         .unwrap_or_default();
-                    
+
                     // 3. 修改复印件
                     // 因为 local_registry 是本地变量，不借用 self，
                     // 所以这里的循环中调用self.error()是可以的
                     for method in methods {
                         if local_registry.contains_key(&method.name.name) {
                             self.error(
-                                format!("Duplicate method '{}'", method.name.name), 
-                                method.name.span
+                                format!("Duplicate method '{}'", method.name.name),
+                                method.name.span,
                             );
                         } else {
-                            local_registry.insert(method.name.name.clone(), MethodInfo {
-                                name: method.name.name.clone(),
-                                def_id: method.id, 
-                                is_pub: method.is_pub,
-                                span: method.span,
-                            });
+                            local_registry.insert(
+                                method.name.name.clone(),
+                                MethodInfo {
+                                    name: method.name.name.clone(),
+                                    def_id: method.id,
+                                    is_pub: method.is_pub,
+                                    span: method.span,
+                                },
+                            );
                         }
                     }
 
                     // 4. 修改好的复印件写回
                     self.ctx.method_registry.insert(key, local_registry);
                 }
-                _ => {} 
-             }
+                _ => {}
+            }
         }
     }
 
     /// ==================================================
-    /// Phase 3: 签名解析 
+    /// Phase 3: 签名解析
     /// ==================================================
-   fn resolve_signatures(&mut self, items: &[Item]) {
+    fn resolve_signatures(&mut self, items: &[Item]) {
         for item in items {
             match &item.kind {
-                ItemKind::ModuleDecl { items: sub_items, .. } => {
-                     if let Some(subs) = sub_items {
+                ItemKind::ModuleDecl {
+                    items: sub_items, ..
+                } => {
+                    if let Some(subs) = sub_items {
                         if let Some(scope) = self.ctx.namespace_scopes.get(&item.id) {
                             self.scopes.push(scope.clone());
                             self.resolve_signatures(subs);
@@ -365,7 +414,7 @@ impl Analyzer {
                         }
                     }
                 }
-                
+
                 ItemKind::StructDecl(def) | ItemKind::UnionDecl(def) => {
                     let mut fields = HashMap::new();
                     for field in &def.fields {
@@ -373,14 +422,14 @@ impl Analyzer {
                         fields.insert(field.name.name.clone(), ty);
                     }
                     self.ctx.struct_fields.insert(item.id, fields);
-                    
+
                     for method in &def.static_methods {
                         self.resolve_function_signature(method);
                     }
                 }
 
                 ItemKind::EnumDecl(def) => {
-                    let enum_type = TypeKey::Named(item.id); 
+                    let enum_type = TypeKey::Named(item.id);
                     for variant in &def.variants {
                         self.record_type(variant.id, enum_type.clone());
                     }
@@ -398,7 +447,7 @@ impl Analyzer {
                         self.resolve_function_signature(method);
                     }
                 }
-                
+
                 ItemKind::GlobalVariable(def) => {
                     let ty_key = self.resolve_ast_type(&def.ty);
                     self.record_type(item.id, ty_key);
@@ -410,17 +459,23 @@ impl Analyzer {
     }
 
     fn resolve_function_signature(&mut self, func: &FunctionDefinition) {
-        let param_keys = func.params.iter()
+        let param_keys = func
+            .params
+            .iter()
             .map(|p| self.resolve_ast_type(&p.ty))
             .collect();
-        
+
         let ret_key = if let Some(ret) = &func.return_type {
             Some(Box::new(self.resolve_ast_type(ret)))
         } else {
-            None 
+            None
         };
 
-        let ty = TypeKey::Function { params: param_keys, ret: ret_key, is_variadic: func.is_variadic };
+        let ty = TypeKey::Function {
+            params: param_keys,
+            ret: ret_key,
+            is_variadic: func.is_variadic,
+        };
         self.record_type(func.id, ty);
     }
 
@@ -437,13 +492,19 @@ impl Analyzer {
     }
 
     fn check_type_match(&mut self, expected: &TypeKey, got: &TypeKey, span: Span) {
-        if expected == got { return; }
+        if expected == got {
+            return;
+        }
 
         match (expected, got) {
             (TypeKey::Primitive(p), TypeKey::IntegerLiteral(val)) => {
                 if self.is_integer_type(p) {
-                    if self.check_int_range(*p, *val) { return; } 
-                    else { self.error(format!("Literal {} out of range", val), span); return; }
+                    if self.check_int_range(*p, *val) {
+                        return;
+                    } else {
+                        self.error(format!("Literal {} out of range", val), span);
+                        return;
+                    }
                 }
             }
             (TypeKey::Primitive(p), TypeKey::FloatLiteral(bits)) => {
@@ -466,12 +527,18 @@ impl Analyzer {
             _ => {}
         }
 
-        self.error(format!("Type mismatch: expected {:?}, found {:?}", expected, got), span);
+        self.error(
+            format!("Type mismatch: expected {:?}, found {:?}", expected, got),
+            span,
+        );
     }
 
     fn is_integer_type(&self, p: &PrimitiveType) -> bool {
         use PrimitiveType::*;
-        matches!(p, I8 | U8 | I16 | U16 | I32 | U32 | I64 | U64 | ISize | USize)
+        matches!(
+            p,
+            I8 | U8 | I16 | U16 | I32 | U32 | I64 | U64 | ISize | USize
+        )
     }
 
     fn check_int_range(&self, p: PrimitiveType, val: u64) -> bool {
@@ -491,7 +558,9 @@ impl Analyzer {
     fn check_bodies(&mut self, items: &[Item]) {
         for item in items {
             match &item.kind {
-                ItemKind::ModuleDecl { items: sub_items, .. } => {
+                ItemKind::ModuleDecl {
+                    items: sub_items, ..
+                } => {
                     if let Some(subs) = sub_items {
                         if let Some(scope) = self.ctx.namespace_scopes.get(&item.id) {
                             self.scopes.push(scope.clone());
@@ -502,24 +571,30 @@ impl Analyzer {
                 }
                 ItemKind::FunctionDecl(func) => self.check_function(func),
                 ItemKind::Implementation { methods, .. } => {
-                    for method in methods { self.check_function(method); }
+                    for method in methods {
+                        self.check_function(method);
+                    }
                 }
                 ItemKind::StructDecl(def) | ItemKind::UnionDecl(def) => {
-                    for method in &def.static_methods { self.check_function(method); }
+                    for method in &def.static_methods {
+                        self.check_function(method);
+                    }
                 }
                 ItemKind::EnumDecl(def) => {
-                    for method in &def.static_methods { self.check_function(method); }
+                    for method in &def.static_methods {
+                        self.check_function(method);
+                    }
                 }
 
                 ItemKind::GlobalVariable(def) => {
                     let declared_ty = self.ctx.types.get(&item.id).unwrap().clone();
-                    
+
                     if let Some(init) = &def.initializer {
-                        // 1. 检查类型 
+                        // 1. 检查类型
                         let init_ty = self.check_expr(init);
                         self.check_type_match(&declared_ty, &init_ty, init.span);
                         self.coerce_literal_type(init.id, &declared_ty, &init_ty);
-                        
+
                         // 全局初始化求值
 
                         // 尝试计算表达式的值 (例如 1 << 12)
@@ -530,12 +605,10 @@ impl Analyzer {
                             }
                             //? mut 和 set?单独开个map?
                             self.ctx.constants.insert(item.id, val);
-
                         } else {
                             //? TODO: 待实现实现 __cxa_atexit运行时全局构造机制
                             self.error("Global initializer must be a constant expression (integer arithmetic)", init.span);
                         }
-
                     } else {
                         if def.modifier != Mutability::Mutable {
                             self.error("Immutable/Const globals must be initialized", def.span);
@@ -554,14 +627,18 @@ impl Analyzer {
             let param_type = self.resolve_ast_type(&param.ty);
             self.record_type(param.id, param_type);
             self.define_symbol(param.name.name.clone(), param.id, param.name.span);
-            let mutability = if param.is_mutable { Mutability::Mutable } else { Mutability::Immutable };
+            let mutability = if param.is_mutable {
+                Mutability::Mutable
+            } else {
+                Mutability::Immutable
+            };
             self.ctx.mutabilities.insert(param.id, mutability);
         }
 
         let expected_ret = if let Some(ret) = &func.return_type {
             self.resolve_ast_type(ret)
         } else {
-            TypeKey::Primitive(PrimitiveType::Unit) 
+            TypeKey::Primitive(PrimitiveType::Unit)
         };
 
         let prev_ret_type = self.current_return_type.clone();
@@ -584,11 +661,17 @@ impl Analyzer {
         self.exit_scope();
     }
 
-   fn check_stmt(&mut self, stmt: &Statement) {
+    fn check_stmt(&mut self, stmt: &Statement) {
         match &stmt.kind {
-           StatementKind::VariableDeclaration { modifier, name, type_annotation, initializer, .. } => {
+            StatementKind::VariableDeclaration {
+                modifier,
+                name,
+                type_annotation,
+                initializer,
+                ..
+            } => {
                 let declared_type = self.resolve_ast_type(type_annotation);
-                
+
                 // 1. 检查初始化逻辑
                 if let Some(init_expr) = initializer {
                     // 有初始化：检查类型是否匹配
@@ -608,11 +691,17 @@ impl Analyzer {
                     // 没有初始化：检查修饰符是否允许
                     match modifier {
                         Mutability::Constant => {
-                            self.error("Constants (const) must be initialized immediately.", stmt.span);
+                            self.error(
+                                "Constants (const) must be initialized immediately.",
+                                stmt.span,
+                            );
                         }
                         Mutability::Immutable => {
                             // 'set' 变量一旦定义就不能改，所以必须定义时就给值
-                            self.error("Immutable variables (set) must be initialized immediately.", stmt.span);
+                            self.error(
+                                "Immutable variables (set) must be initialized immediately.",
+                                stmt.span,
+                            );
                         }
                         Mutability::Mutable => {
                             // 'mut' 允许不初始化 (保留语义上的“垃圾值”状态)
@@ -621,40 +710,38 @@ impl Analyzer {
                     }
                 }
 
-                // 2. 注册符号和类型 
+                // 2. 注册符号和类型
                 self.define_symbol(name.name.clone(), stmt.id, name.span);
                 self.record_type(stmt.id, declared_type);
-                
-                // 3. 记录可变性 
+
+                // 3. 记录可变性
                 self.ctx.mutabilities.insert(stmt.id, *modifier);
             }
 
-           StatementKind::Assignment { lhs, rhs } => {
+            StatementKind::Assignment { lhs, rhs } => {
                 let lhs_ty = self.check_expr(lhs);
                 let rhs_ty = self.check_expr(rhs);
-                
+
                 // 1. 类型匹配
                 self.check_type_match(&lhs_ty, &rhs_ty, stmt.span);
-                
+
                 // 如果 rhs 是字面量，告诉它具体的类型
                 self.coerce_literal_type(rhs.id, &lhs_ty, &rhs_ty);
 
                 // 2. L-Value 可变性检查
                 self.check_lvalue_mutability(lhs);
             }
-            
+
             StatementKind::Block(block) => self.check_block(block),
 
-            StatementKind::ExpressionStatement(expr) => {
-                match expr.kind {
-                    ExpressionKind::Call { .. } | ExpressionKind::MethodCall { .. } => {
-                        self.check_expr(expr); 
-                    }
-                    _ => {
-                        self.error("Only function calls can be used as statements.", expr.span);
-                    }
+            StatementKind::ExpressionStatement(expr) => match expr.kind {
+                ExpressionKind::Call { .. } | ExpressionKind::MethodCall { .. } => {
+                    self.check_expr(expr);
                 }
-            }
+                _ => {
+                    self.error("Only function calls can be used as statements.", expr.span);
+                }
+            },
 
             StatementKind::Return(opt_expr) => {
                 let expected_ret_opt = self.current_return_type.clone();
@@ -662,8 +749,11 @@ impl Analyzer {
                     match opt_expr {
                         Some(expr) => {
                             if let TypeKey::Primitive(PrimitiveType::Unit) = expected {
-                                self.error("Procedure (void function) cannot return a value.", expr.span);
-                                self.check_expr(expr); 
+                                self.error(
+                                    "Procedure (void function) cannot return a value.",
+                                    expr.span,
+                                );
+                                self.check_expr(expr);
                             } else {
                                 let actual = self.check_expr(expr);
                                 self.check_type_match(&expected, &actual, expr.span);
@@ -671,35 +761,59 @@ impl Analyzer {
                             }
                         }
                         None => {
-                            if let TypeKey::Primitive(PrimitiveType::Unit) = expected { /* OK */ } 
-                            else { self.error("Function must return a value.", stmt.span); }
+                            if let TypeKey::Primitive(PrimitiveType::Unit) = expected { /* OK */
+                            } else {
+                                self.error("Function must return a value.", stmt.span);
+                            }
                         }
                     }
                 } else {
                     self.error("Return statement outside of function context.", stmt.span);
                 }
             }
-            StatementKind::If { condition, then_block, else_branch } => {
+            StatementKind::If {
+                condition,
+                then_block,
+                else_branch,
+            } => {
                 let cond_ty = self.check_expr(condition);
-                self.check_type_match(&TypeKey::Primitive(PrimitiveType::Bool), &cond_ty, condition.span);
+                self.check_type_match(
+                    &TypeKey::Primitive(PrimitiveType::Bool),
+                    &cond_ty,
+                    condition.span,
+                );
                 self.check_block(then_block);
                 if let Some(else_stmt) = else_branch {
                     self.check_stmt(else_stmt);
                 }
             }
 
-            StatementKind::While { condition, init_statement, body } => {
+            StatementKind::While {
+                condition,
+                init_statement,
+                body,
+            } => {
                 self.enter_scope(ScopeKind::Loop);
-                if let Some(init) = init_statement { self.check_stmt(init); }
-                
+                if let Some(init) = init_statement {
+                    self.check_stmt(init);
+                }
+
                 let cond_ty = self.check_expr(condition);
-                self.check_type_match(&TypeKey::Primitive(PrimitiveType::Bool), &cond_ty, condition.span);
-                
+                self.check_type_match(
+                    &TypeKey::Primitive(PrimitiveType::Bool),
+                    &cond_ty,
+                    condition.span,
+                );
+
                 self.check_block(body);
                 self.exit_scope();
             }
 
-            StatementKind::Switch { target, cases, default_case } => {
+            StatementKind::Switch {
+                target,
+                cases,
+                default_case,
+            } => {
                 let target_ty = self.check_expr(target);
                 for case in cases {
                     for pattern in &case.patterns {
@@ -726,12 +840,12 @@ impl Analyzer {
     fn check_expr(&mut self, expr: &Expression) -> TypeKey {
         let ty = match &expr.kind {
             ExpressionKind::Literal(lit) => match lit {
-                Literal::Integer(val) => TypeKey::IntegerLiteral(*val), 
+                Literal::Integer(val) => TypeKey::IntegerLiteral(*val),
                 Literal::Float(val) => TypeKey::FloatLiteral(val.to_bits()),
                 Literal::Boolean(_) => TypeKey::Primitive(PrimitiveType::Bool),
                 Literal::String(_) => TypeKey::Pointer(
-                    Box::new(TypeKey::Primitive(PrimitiveType::U8)), 
-                    Mutability::Constant
+                    Box::new(TypeKey::Primitive(PrimitiveType::U8)),
+                    Mutability::Constant,
                 ),
                 Literal::Char(_) => TypeKey::Primitive(PrimitiveType::I32),
             },
@@ -745,10 +859,16 @@ impl Analyzer {
                         TypeKey::Error
                     }
                 } else {
-                    self.error(format!("Undefined symbol: {:?}", path.segments.first().unwrap().name), path.span);
+                    self.error(
+                        format!(
+                            "Undefined symbol: {:?}",
+                            path.segments.first().unwrap().name
+                        ),
+                        path.span,
+                    );
                     TypeKey::Error
                 }
-            },
+            }
 
             ExpressionKind::Binary { lhs, op, rhs } => {
                 let lhs_ty = self.check_expr(lhs);
@@ -762,25 +882,27 @@ impl Analyzer {
                 self.coerce_literal_type(lhs.id, &rhs_ty, &lhs_ty);
 
                 match op {
-                    BinaryOperator::Equal | BinaryOperator::NotEqual | 
-                    BinaryOperator::Less | BinaryOperator::Greater |
-                    BinaryOperator::LessEqual | BinaryOperator::GreaterEqual => {
-                        TypeKey::Primitive(PrimitiveType::Bool)
-                    }
-                    _ => lhs_ty 
+                    BinaryOperator::Equal
+                    | BinaryOperator::NotEqual
+                    | BinaryOperator::Less
+                    | BinaryOperator::Greater
+                    | BinaryOperator::LessEqual
+                    | BinaryOperator::GreaterEqual => TypeKey::Primitive(PrimitiveType::Bool),
+                    _ => lhs_ty,
                 }
-            },
+            }
 
             ExpressionKind::StructLiteral { type_name, fields } => {
                 if let Some(def_id) = self.resolve_path(type_name) {
-                    
                     for init in fields {
                         // 1. 先计算实际给的值的类型 (e.g., IntegerLiteral(10))
                         let actual_ty = self.check_expr(&init.value);
-                        
+
                         // 2. 查找结构体定义中这个字段期望的类型 (e.g., u8)
                         let field_name = &init.field_name.name;
-                        let expected_ty_opt = self.ctx.struct_fields
+                        let expected_ty_opt = self
+                            .ctx
+                            .struct_fields
                             .get(&def_id)
                             .and_then(|fs| fs.get(field_name))
                             .cloned();
@@ -790,15 +912,17 @@ impl Analyzer {
                             // 检查类型是否兼容
                             self.check_type_match(&expected_ty, &actual_ty, init.value.span);
                             self.coerce_literal_type(init.value.id, &expected_ty, &actual_ty);
-
                         } else {
                             // 错误处理逻辑保持不变
                             if self.ctx.struct_fields.contains_key(&def_id) {
-                                self.error(format!("Struct has no field named '{}'", field_name), init.field_name.span);
+                                self.error(
+                                    format!("Struct has no field named '{}'", field_name),
+                                    init.field_name.span,
+                                );
                             } else {
                                 self.error("Not a struct definition", type_name.span);
                                 //? 更多的sync和报错?
-                                return TypeKey::Error; 
+                                return TypeKey::Error;
                             }
                         }
                     }
@@ -808,16 +932,22 @@ impl Analyzer {
                     self.error("Unknown struct type", type_name.span);
                     TypeKey::Error
                 }
-            },
+            }
 
-            ExpressionKind::FieldAccess { receiver, field_name } => {
+            ExpressionKind::FieldAccess {
+                receiver,
+                field_name,
+            } => {
                 let receiver_type = self.check_expr(receiver);
                 if let TypeKey::Named(def_id) = receiver_type {
                     if let Some(fields) = self.ctx.struct_fields.get(&def_id) {
                         if let Some(field_ty) = fields.get(&field_name.name) {
                             field_ty.clone()
                         } else {
-                            self.error(format!("Field '{}' not found", field_name.name), field_name.span);
+                            self.error(
+                                format!("Field '{}' not found", field_name.name),
+                                field_name.span,
+                            );
                             TypeKey::Error
                         }
                     } else {
@@ -825,24 +955,44 @@ impl Analyzer {
                         TypeKey::Error
                     }
                 } else {
-                    self.error(format!("Expected struct type, found {:?}", receiver_type), receiver.span);
+                    self.error(
+                        format!("Expected struct type, found {:?}", receiver_type),
+                        receiver.span,
+                    );
                     TypeKey::Error
                 }
-            },
+            }
 
             ExpressionKind::Call { callee, arguments } => {
                 let callee_type = self.check_expr(callee);
                 // 解构时加上 is_variadic
-                if let TypeKey::Function { params, ret, is_variadic } = callee_type {
-                    
+                if let TypeKey::Function {
+                    params,
+                    ret,
+                    is_variadic,
+                } = callee_type
+                {
                     // 1. 检查参数数量
                     if is_variadic {
                         if arguments.len() < params.len() {
-                            self.error(format!("Variadic function requires at least {} arguments", params.len()), expr.span);
+                            self.error(
+                                format!(
+                                    "Variadic function requires at least {} arguments",
+                                    params.len()
+                                ),
+                                expr.span,
+                            );
                         }
                     } else {
                         if params.len() != arguments.len() {
-                            self.error(format!("Argument count mismatch: expected {}, got {}", params.len(), arguments.len()), expr.span);
+                            self.error(
+                                format!(
+                                    "Argument count mismatch: expected {}, got {}",
+                                    params.len(),
+                                    arguments.len()
+                                ),
+                                expr.span,
+                            );
                         }
                     }
 
@@ -854,19 +1004,19 @@ impl Analyzer {
                         self.coerce_literal_type(arg_expr.id, param_ty, &arg_actual_ty);
                     }
 
-                    // 3. 处理变长参数 
+                    // 3. 处理变长参数
                     // 对于多出来的参数，需要 check_expr 以便计算它们的类型（否则 Codegen 查表会 panic）
                     if arguments.len() > params.len() {
                         for arg_expr in &arguments[params.len()..] {
                             let arg_ty = self.check_expr(arg_expr);
-                            
+
                             // C 语言的变长参数的Default Argument Promotions
                             // float -> double
                             // char/short -> int
                             // 如果是整数字面量，且没被约束，默认回写为 i32 (int 提升)
                             if let TypeKey::IntegerLiteral(val) = arg_ty {
                                 // 如果超过 u32::MAX，说明必须用 i64
-                                // 否则默认提升为 i32 
+                                // 否则默认提升为 i32
                                 //? 确认检查+test?
                                 let target_type = if val > u32::MAX as u64 {
                                     TypeKey::Primitive(PrimitiveType::I64)
@@ -877,34 +1027,52 @@ impl Analyzer {
                             }
                             // 如果是浮点字面量，默认回写为 f64 (double)
                             if let TypeKey::FloatLiteral(_) = arg_ty {
-                                self.coerce_literal_type(arg_expr.id, &TypeKey::Primitive(PrimitiveType::F64), &arg_ty);
+                                self.coerce_literal_type(
+                                    arg_expr.id,
+                                    &TypeKey::Primitive(PrimitiveType::F64),
+                                    &arg_ty,
+                                );
                             }
                         }
                     }
 
-                    if let Some(ret_ty) = ret { *ret_ty } else { TypeKey::Primitive(PrimitiveType::Unit) }
-                
+                    if let Some(ret_ty) = ret {
+                        *ret_ty
+                    } else {
+                        TypeKey::Primitive(PrimitiveType::Unit)
+                    }
                 } else {
                     if !matches!(callee_type, TypeKey::Error) {
                         self.error("Expected function type", callee.span);
                     }
                     TypeKey::Error
                 }
-            },
+            }
 
-            ExpressionKind::MethodCall { receiver, method_name, arguments } => {
+            ExpressionKind::MethodCall {
+                receiver,
+                method_name,
+                arguments,
+            } => {
                 let receiver_type = self.check_expr(receiver);
-                if let TypeKey::Error = receiver_type { return TypeKey::Error; }
+                if let TypeKey::Error = receiver_type {
+                    return TypeKey::Error;
+                }
 
-                let method_info = if let Some(methods) = self.ctx.method_registry.get(&receiver_type) {
-                    methods.get(&method_name.name).cloned()
-                } else { None };
+                let method_info =
+                    if let Some(methods) = self.ctx.method_registry.get(&receiver_type) {
+                        methods.get(&method_name.name).cloned()
+                    } else {
+                        None
+                    };
 
                 if let Some(info) = method_info {
-                    if let Some(TypeKey::Function { params, ret, .. }) = self.ctx.types.get(&info.def_id).cloned() {
+                    if let Some(TypeKey::Function { params, ret, .. }) =
+                        self.ctx.types.get(&info.def_id).cloned()
+                    {
                         let expected_args = if params.is_empty() { &[] } else { &params[1..] };
                         if expected_args.len() != arguments.len() {
-                             self.error(format!("Method argument count mismatch"), expr.span);
+                            self.error(format!("Method argument count mismatch"), expr.span);
                         }
                         for (arg_expr, param_ty) in arguments.iter().zip(expected_args.iter()) {
                             let arg_actual = self.check_expr(arg_expr);
@@ -912,21 +1080,30 @@ impl Analyzer {
                             // 固化方法参数的字面量类型
                             self.coerce_literal_type(arg_expr.id, param_ty, &arg_actual);
                         }
-                        if let Some(r) = ret { *r } else { TypeKey::Primitive(PrimitiveType::Unit) }
-                    } else { TypeKey::Error }
+                        if let Some(r) = ret {
+                            *r
+                        } else {
+                            TypeKey::Primitive(PrimitiveType::Unit)
+                        }
+                    } else {
+                        TypeKey::Error
+                    }
                 } else {
-                    self.error(format!("Method '{}' not found", method_name.name), method_name.span);
+                    self.error(
+                        format!("Method '{}' not found", method_name.name),
+                        method_name.span,
+                    );
                     TypeKey::Error
                 }
-            },
+            }
 
             ExpressionKind::Index { target, index } => {
                 // 1. 递归检查目标（数组）
                 let target_ty = self.check_expr(target);
-                
+
                 // 2. 递归检查索引（必须是整数）
                 let index_ty = self.check_expr(index);
-                
+
                 // 检查索引是否为整数类型
                 let is_index_valid = match &index_ty {
                     TypeKey::Primitive(p) => self.is_integer_type(p),
@@ -938,7 +1115,11 @@ impl Analyzer {
                     self.error("Array index must be an integer", index.span);
                 } else {
                     // 固化索引字面量类型 (统一固化i64)
-                    self.coerce_literal_type(index.id, &TypeKey::Primitive(PrimitiveType::I64), &index_ty);
+                    self.coerce_literal_type(
+                        index.id,
+                        &TypeKey::Primitive(PrimitiveType::I64),
+                        &index_ty,
+                    );
                 }
 
                 // 3. 检查 Target 类型并解包
@@ -947,37 +1128,39 @@ impl Analyzer {
                         // 如果是数组 [T; N]，索引操作的结果类型就是 T
                         *inner
                     }
-                    
+
                     TypeKey::Pointer(_, _) => {
                         // 禁止指针使用 []
                         self.error("Cannot index a pointer with '[]'. Pointers and Arrays are distinct in 9-lang.", target.span);
                         TypeKey::Error
                     }
-                    
+
                     TypeKey::Error => TypeKey::Error, // 级联错误，忽略
-                    
+
                     _ => {
-                        self.error(format!("Type {:?} cannot be indexed", target_ty), target.span);
+                        self.error(
+                            format!("Type {:?} cannot be indexed", target_ty),
+                            target.span,
+                        );
                         TypeKey::Error
                     }
                 }
-            },
+            }
 
             ExpressionKind::StaticAccess { target, member } => {
                 // 检查 Target 类型 (Struct Name 或 Enum Name)
-                let target_ty = self.check_expr(target); 
+                let target_ty = self.check_expr(target);
                 if let TypeKey::Named(container_id) = target_ty {
                     // 在 container (struct/enum) 的命名空间里查找 member
                     if let Some(scope) = self.ctx.namespace_scopes.get(&container_id) {
-                        
                         if let Some(&def_id) = scope.symbols.get(&member.name) {
                             // 找到了(可能是静态方法，也可能是 Enum Variant)
                             let found_type = self.get_type_of_def(def_id);
                             //? found_types 检查?
-                            
+
                             // 记录解析结果，供 Codegen 使用
                             self.ctx.path_resolutions.insert(expr.id, def_id);
-                            
+
                             // 返回类型
                             if let Some(ty) = self.get_type_of_def(def_id) {
                                 // 如果是 Enum Variant，已经处理为 IntegerLiteral
@@ -990,7 +1173,7 @@ impl Analyzer {
                 }
                 //? TODO: Fallback 到Enum IntegerLiteral?
                 TypeKey::Error
-            },
+            }
 
             // --- 一元运算 ---
             ExpressionKind::Unary { op, operand } => {
@@ -999,35 +1182,42 @@ impl Analyzer {
                     UnaryOperator::AddressOf => {
                         // 1. 获取操作数的可变性
                         let mutability = self.get_expr_mutability(operand);
-                        
+
                         // 2. 生成对应的指针类型
                         // 如果 operand 是 mut，生成 *T (Mutable)
                         // 否则生成 ^T (Constant)
                         TypeKey::Pointer(Box::new(inner), mutability)
                     }
                     UnaryOperator::Dereference => {
-                        if let TypeKey::Pointer(base, _) = inner { *base } 
-                        else { self.error("Cannot deref non-pointer", expr.span); TypeKey::Error }
+                        if let TypeKey::Pointer(base, _) = inner {
+                            *base
+                        } else {
+                            self.error("Cannot deref non-pointer", expr.span);
+                            TypeKey::Error
+                        }
                     }
                     // 取负
                     UnaryOperator::Negate => {
                         let is_valid = match &inner {
                             // 1. 基础类型：必须是数值
                             TypeKey::Primitive(p) => self.is_numeric_type(p),
-                            
+
                             // 2. 字面量：允许（变成负字面量）
                             TypeKey::IntegerLiteral(_) | TypeKey::FloatLiteral(_) => true,
-                            
+
                             // 3. 错误恢复
                             TypeKey::Error => true,
-                            
+
                             _ => false,
                         };
 
                         if !is_valid {
                             self.error(
-                                format!("Cannot apply unary minus operator '-' to type {:?}", inner), 
-                                expr.span
+                                format!(
+                                    "Cannot apply unary minus operator '-' to type {:?}",
+                                    inner
+                                ),
+                                expr.span,
                             );
                             TypeKey::Error
                         } else {
@@ -1036,26 +1226,33 @@ impl Analyzer {
                             if let TypeKey::Primitive(p) = &inner {
                                 if !self.is_signed_numeric(p) {
                                     self.error(
-                                        format!("Cannot negate unsigned integer type {:?}", p), 
-                                        expr.span
+                                        format!("Cannot negate unsigned integer type {:?}", p),
+                                        expr.span,
                                     );
                                     // 报错后返回 inner 继续检查
                                 }
                             }
-                            
+
                             // 字面量取负是合法的 (IntegerLiteral 只是一个数，还没定类型，取负后变为负数意图)
                             inner
                         }
                     }
                     // 补全：逻辑非
                     UnaryOperator::Not => {
-                        self.check_type_match(&TypeKey::Primitive(PrimitiveType::Bool), &inner, expr.span);
+                        self.check_type_match(
+                            &TypeKey::Primitive(PrimitiveType::Bool),
+                            &inner,
+                            expr.span,
+                        );
                         TypeKey::Primitive(PrimitiveType::Bool)
                     }
                 }
-            },
-            
-            ExpressionKind::Cast { expr: src_expr, target_type } => {
+            }
+
+            ExpressionKind::Cast {
+                expr: src_expr,
+                target_type,
+            } => {
                 // 1. 解析目标类型 (T)
                 let target_ty = self.resolve_ast_type(target_type);
 
@@ -1065,7 +1262,7 @@ impl Analyzer {
 
                 //? TODO: 3. 检查 Cast 是否合法
                 //? e.g.,禁止 Struct 转 Int，或者做一些基础检查
-                
+
                 //? TODO: 4. 固化字面量(优化)
                 //? 如果是 10 as u8，我们可以顺手把 10 固化为 u8，减少 Codegen 的 cast 指令
                 //? 但 LLVM 优化器也会做这件事?
@@ -1073,7 +1270,7 @@ impl Analyzer {
 
                 // Cast 表达式的类型就是目标类型
                 target_ty
-            },
+            }
         };
 
         self.record_type(expr.id, ty.clone());
@@ -1083,7 +1280,7 @@ impl Analyzer {
     /// ==================================================
     /// 辅助函数
     /// ==================================================
-    // 检查表达式是否可以被赋值 
+    // 检查表达式是否可以被赋值
     fn check_lvalue_mutability(&mut self, expr: &Expression) {
         match &expr.kind {
             // Case 1: 变量 (Path)
@@ -1095,8 +1292,11 @@ impl Analyzer {
                     if let Some(&mutability) = self.ctx.mutabilities.get(&def_id) {
                         if mutability != Mutability::Mutable {
                             self.error(
-                                format!("Cannot assign to immutable variable/parameter '{:?}'", path.segments.last().unwrap().name), 
-                                expr.span
+                                format!(
+                                    "Cannot assign to immutable variable/parameter '{:?}'",
+                                    path.segments.last().unwrap().name
+                                ),
+                                expr.span,
                             );
                         }
                     } else {
@@ -1107,20 +1307,34 @@ impl Analyzer {
             }
 
             // Case 2: 字段访问 (s.x)
-            ExpressionKind::FieldAccess { receiver, field_name: _ } => {
+            ExpressionKind::FieldAccess {
+                receiver,
+                field_name: _,
+            } => {
                 // 如果要修改 s.x，那么 s 必须是可变的
                 // 递归检查 receiver
                 self.check_lvalue_mutability(receiver);
             }
 
             // Case 3: 解引用 (ptr^)
-            ExpressionKind::Unary { op: UnaryOperator::Dereference, operand } => {
+            ExpressionKind::Unary {
+                op: UnaryOperator::Dereference,
+                operand,
+            } => {
                 // 如果要修改 ptr^，那么 ptr 必须是 *T (Mutable Pointer)，不能是 ^T (Const Pointer)
-                let ptr_type = self.ctx.types.get(&operand.id).cloned().unwrap_or(TypeKey::Error);
-                
+                let ptr_type = self
+                    .ctx
+                    .types
+                    .get(&operand.id)
+                    .cloned()
+                    .unwrap_or(TypeKey::Error);
+
                 match ptr_type {
                     TypeKey::Pointer(_, Mutability::Constant) => {
-                        self.error("Cannot assign to content of a const pointer (^T)", expr.span);
+                        self.error(
+                            "Cannot assign to content of a const pointer (^T)",
+                            expr.span,
+                        );
                     }
                     TypeKey::Pointer(_, Mutability::Mutable) => {
                         // OK: *T 允许修改内容
@@ -1130,7 +1344,7 @@ impl Analyzer {
                     }
                 }
             }
-            
+
             // Case 4: 数组索引 (arr[i])
             ExpressionKind::Index { target, .. } => {
                 // 修改 arr[i]，意味着 arr 必须可变
@@ -1152,26 +1366,29 @@ impl Analyzer {
             ExpressionKind::Path(path) => {
                 if let Some(&def_id) = self.ctx.path_resolutions.get(&path.id) {
                     // 如果表里没记录（比如全局变量暂未处理），默认不可变
-                    *self.ctx.mutabilities.get(&def_id).unwrap_or(&Mutability::Immutable)
+                    *self
+                        .ctx
+                        .mutabilities
+                        .get(&def_id)
+                        .unwrap_or(&Mutability::Immutable)
                 } else {
                     Mutability::Immutable
                 }
             }
 
             // 2. 字段访问 (obj.field)：取决于 obj 是否可变
-            ExpressionKind::FieldAccess { receiver, .. } => {
-                self.get_expr_mutability(receiver)
-            }
+            ExpressionKind::FieldAccess { receiver, .. } => self.get_expr_mutability(receiver),
 
             // 3. 数组索引 (arr[i])：取决于 arr 是否可变
-            ExpressionKind::Index { target, .. } => {
-                self.get_expr_mutability(target)
-            }
+            ExpressionKind::Index { target, .. } => self.get_expr_mutability(target),
 
             // 4. 解引用 (ptr^)：取决于 ptr 本身是指向可变还是不可变
             // 如果 ptr 是 *T (Mutable Pointer)，那么 ptr^ 是可变的。
             // 如果 ptr 是 ^T (Const Pointer)，那么 ptr^ 是不可变的。
-            ExpressionKind::Unary { op: UnaryOperator::Dereference, operand } => {
+            ExpressionKind::Unary {
+                op: UnaryOperator::Dereference,
+                operand,
+            } => {
                 if let Some(TypeKey::Pointer(_, mutability)) = self.ctx.types.get(&operand.id) {
                     *mutability
                 } else {
@@ -1187,7 +1404,8 @@ impl Analyzer {
     // 检查是否为数值类型 (整数 或 浮点数)
     fn is_numeric_type(&self, p: &PrimitiveType) -> bool {
         use PrimitiveType::*;
-        matches!(p, 
+        matches!(
+            p,
             // 整数
             I8 | U8 | I16 | U16 | I32 | U32 | I64 | U64 | ISize | USize |
             // 浮点数
@@ -1198,7 +1416,8 @@ impl Analyzer {
     // 检查是否为有符号数值 (Signed Int 或 Float)
     fn is_signed_numeric(&self, p: &PrimitiveType) -> bool {
         use PrimitiveType::*;
-        matches!(p, 
+        matches!(
+            p,
             // 有符号整数
             I8 | I16 | I32 | I64 | ISize |
             // 浮点数 (天然有符号)
@@ -1229,7 +1448,10 @@ impl Analyzer {
                 if let Some(def_id) = self.resolve_path(path) {
                     TypeKey::Named(def_id)
                 } else {
-                    self.error(format!("Unknown type: {:?}", path.segments.last().unwrap().name), path.span);
+                    self.error(
+                        format!("Unknown type: {:?}", path.segments.last().unwrap().name),
+                        path.span,
+                    );
                     TypeKey::Error
                 }
             }
@@ -1243,15 +1465,23 @@ impl Analyzer {
             }
             TypeKind::Function { params, ret_type } => {
                 let p = params.iter().map(|t| self.resolve_ast_type(t)).collect();
-                let r = ret_type.as_ref().map(|t| Box::new(self.resolve_ast_type(t)));
-                TypeKey::Function { params: p, ret: r, is_variadic: false}
+                let r = ret_type
+                    .as_ref()
+                    .map(|t| Box::new(self.resolve_ast_type(t)));
+                TypeKey::Function {
+                    params: p,
+                    ret: r,
+                    is_variadic: false,
+                }
             }
         }
     }
 
     fn resolve_path(&mut self, path: &Path) -> Option<DefId> {
-        if path.segments.is_empty() { return None; }
-        
+        if path.segments.is_empty() {
+            return None;
+        }
+
         let first_seg = &path.segments[0];
         let mut current_def_id = None;
 
@@ -1262,17 +1492,23 @@ impl Analyzer {
             }
         }
 
-        if current_def_id.is_none() { return None; }
+        if current_def_id.is_none() {
+            return None;
+        }
 
         for segment in path.segments.iter().skip(1) {
             let parent_id = current_def_id.unwrap();
             if let Some(scope) = self.ctx.namespace_scopes.get(&parent_id) {
                 if let Some(&child_id) = scope.symbols.get(&segment.name) {
                     current_def_id = Some(child_id);
-                } else { return None; }
-            } else { return None; }
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
         }
-        
+
         if let Some(final_id) = current_def_id {
             self.ctx.path_resolutions.insert(path.id, final_id);
         }
@@ -1287,11 +1523,11 @@ impl Analyzer {
             scope.symbols.insert(name, id);
         }
     }
-    
+
     fn enter_scope(&mut self, kind: ScopeKind) {
         self.scopes.push(Scope::new(kind));
     }
-    
+
     fn exit_scope(&mut self) -> Scope {
         self.scopes.pop().expect("Scope unbalanced!")
     }
@@ -1301,7 +1537,7 @@ impl Analyzer {
         if name == "main" {
             return name.to_string();
         }
-        
+
         // 如果在根模块，直接返回名字
         if self.module_path.is_empty() {
             return name.to_string();
@@ -1320,7 +1556,7 @@ impl Analyzer {
             TypeKind::Named(path) => {
                 // 取路径的最后一段，例如 std::io::File -> File
                 path.segments.last().unwrap().name.clone()
-            },
+            }
             TypeKind::Pointer { inner, .. } => self.get_mangling_type_name(inner),
             TypeKind::Array { inner, .. } => format!("Arr_{}", self.get_mangling_type_name(inner)), //? 更“安全”的处理方式？
             TypeKind::Primitive(p) => format!("{:?}", p), // e.g. "I32"
@@ -1335,47 +1571,62 @@ impl Analyzer {
         match &expr.kind {
             // 1. 字面量
             ExpressionKind::Literal(Literal::Integer(val)) => Some(*val),
-            
+
             // 2. 引用其他常量
             ExpressionKind::Path(path) => {
                 let def_id = self.ctx.path_resolutions.get(&path.id)?;
                 // 只有当目标是 const 定义时，才能取值
                 self.ctx.constants.get(def_id).cloned()
-            },
+            }
 
             // 3. 二元运算 (递归计算)
             ExpressionKind::Binary { lhs, op, rhs } => {
                 let l = self.eval_constant_expr(lhs)?;
                 let r = self.eval_constant_expr(rhs)?;
-                
+
                 match op {
                     BinaryOperator::Add => Some(l.wrapping_add(r)),
                     BinaryOperator::Subtract => Some(l.wrapping_sub(r)),
                     BinaryOperator::Multiply => Some(l.wrapping_mul(r)),
-                    BinaryOperator::Divide => if r == 0 { None } else { Some(l / r) },
-                    BinaryOperator::Modulo => if r == 0 { None } else { Some(l % r) },
-                    
+                    BinaryOperator::Divide => {
+                        if r == 0 {
+                            None
+                        } else {
+                            Some(l / r)
+                        }
+                    }
+                    BinaryOperator::Modulo => {
+                        if r == 0 {
+                            None
+                        } else {
+                            Some(l % r)
+                        }
+                    }
+
                     // 位运算
                     BinaryOperator::ShiftLeft => Some(l << r),
                     BinaryOperator::ShiftRight => Some(l >> r),
                     BinaryOperator::BitwiseAnd => Some(l & r),
-                    BinaryOperator::BitwiseOr  => Some(l | r),
+                    BinaryOperator::BitwiseOr => Some(l | r),
                     BinaryOperator::BitwiseXor => Some(l ^ r),
-                    
+
                     _ => None, // 比较运算暂不支持作为数值常量
                 }
-            },
-            
+            }
+
             // 4. 一元运算
-            ExpressionKind::Unary { op: UnaryOperator::Negate, operand } => {
+            ExpressionKind::Unary {
+                op: UnaryOperator::Negate,
+                operand,
+            } => {
                 let val = self.eval_constant_expr(operand)?;
                 // 这里按位取负 (u64 view)
-                Some((-(val as i64)) as u64) 
-            },
+                Some((-(val as i64)) as u64)
+            }
 
             ExpressionKind::Cast { expr: src_expr, .. } => {
                 let val = self.eval_constant_expr(src_expr)?;
-                
+
                 // 获取 Cast 表达式的目标类型 (check_expr 已经计算并记录了)
                 if let Some(target_key) = self.ctx.types.get(&expr.id) {
                     match target_key {
@@ -1387,21 +1638,21 @@ impl Analyzer {
                                 PrimitiveType::U16 | PrimitiveType::I16 => Some(val & 0xFFFF),
                                 PrimitiveType::U32 | PrimitiveType::I32 => Some(val & 0xFFFFFFFF),
                                 // 64位及其他保留原值
-                                _ => Some(val)
+                                _ => Some(val),
                             }
                         }
                         // 2. 如果目标是指针 (如 0xB8000 as *u16)，保留地址值
                         TypeKey::Pointer(..) => Some(val),
-                        
+
                         // 其他情况 (如转 Float)，暂不支持常量求值
                         //? 更完善的consexpr机制？
-                        _ => Some(val) 
+                        _ => Some(val),
                     }
                 } else {
                     // 理论上 check_expr 应该已经填好类型了，直接返回
                     Some(val)
                 }
-            },
+            }
 
             // 其他情况（函数调用等）不是常量
             //? 更完善的constexpr?

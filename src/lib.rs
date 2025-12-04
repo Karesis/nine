@@ -1,38 +1,52 @@
+//    Copyright 2025 Karesis
+//
+//    Licensed under the Apache License, Version 2.0 (the "License");
+//    you may not use this file except in compliance with the License.
+//    You may obtain a copy of the License at
+//
+//        http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing, software
+//    distributed under the License is distributed on an "AS IS" BASIS,
+//    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//    See the License for the specific language governing permissions and
+//    limitations under the License.
+
+pub mod analyzer;
 pub mod ast;
+pub mod codegen;
+pub mod diagnostic;
 pub mod driver;
 pub mod lexer;
 pub mod parser;
 pub mod source;
 pub mod token;
-pub mod analyzer;
-pub mod codegen;
-pub mod diagnostic;
 
-use std::path::PathBuf;
-use std::error::Error;
-use inkwell::targets::{
-    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
-};
-use inkwell::context::Context;
-use inkwell::module::Module;
-use crate::driver::Driver;
 use crate::analyzer::Analyzer;
 use crate::codegen::CodeGen;
 use crate::diagnostic::emit_diagnostics;
+use crate::driver::Driver;
 use inkwell::OptimizationLevel;
+use inkwell::context::Context;
+use inkwell::module::Module;
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+};
+use std::error::Error;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub enum EmitType {
     LlvmIr,
     Bitcode,
     Object,
-    Executable, 
+    Executable,
 }
 
 #[derive(Debug, Clone)]
 pub struct CompileConfig {
     pub source_path: PathBuf,
-    pub output_path: Option<PathBuf>, 
+    pub output_path: Option<PathBuf>,
     pub emit_type: EmitType,
     pub verbose: bool,
 }
@@ -40,7 +54,7 @@ pub struct CompileConfig {
 /// 返回 Result<(), Box<dyn Error>> 以便于上层处理错误
 pub fn compile(config: CompileConfig) -> Result<(), Box<dyn Error>> {
     let mut driver = Driver::new();
-    
+
     // 1. Driver/Parser 阶段
     let program = match driver.compile_project(config.source_path.clone()) {
         Ok(p) => p,
@@ -68,7 +82,7 @@ pub fn compile(config: CompileConfig) -> Result<(), Box<dyn Error>> {
         return Err("Compilation failed due to semantic errors".into());
     }
 
-    // 3. Codegen 
+    // 3. Codegen
     let context = Context::create();
     let module_name = config.source_path.file_stem().unwrap().to_str().unwrap();
     let module = context.create_module(module_name);
@@ -104,22 +118,30 @@ fn handle_output(module: &Module, config: &CompileConfig) -> Result<(), Box<dyn 
 
     match config.emit_type {
         EmitType::LlvmIr => {
-            module.print_to_file(&output_path).map_err(|e| e.to_string())?;
+            module
+                .print_to_file(&output_path)
+                .map_err(|e| e.to_string())?;
         }
         EmitType::Object => {
             // 将原来的 emit_object_file 逻辑移到这里或 codegen 模块中
             emit_object_file(module, &output_path)?;
         }
         _ => {
-            eprintln!("Warning: Output type {:?} not yet fully implemented", config.emit_type);
+            eprintln!(
+                "Warning: Output type {:?} not yet fully implemented",
+                config.emit_type
+            );
         }
     }
-    
+
     Ok(())
 }
 
 // 辅助：生成 .o 文件
-fn emit_object_file(module: &inkwell::module::Module, path: &std::path::Path) -> Result<(), String> {
+fn emit_object_file(
+    module: &inkwell::module::Module,
+    path: &std::path::Path,
+) -> Result<(), String> {
     // 1. 初始化 Native Target
     Target::initialize_all(&InitializationConfig::default());
 

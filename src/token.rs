@@ -1,6 +1,20 @@
+//    Copyright 2025 Karesis
+//
+//    Licensed under the Apache License, Version 2.0 (the "License");
+//    you may not use this file except in compliance with the License.
+//    You may obtain a copy of the License at
+//
+//        http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing, software
+//    distributed under the License is distributed on an "AS IS" BASIS,
+//    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//    See the License for the specific language governing permissions and
+//    limitations under the License.
+
 use crate::source::Span;
 
-#[derive(Debug, Clone, Copy)] 
+#[derive(Debug, Clone, Copy)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
@@ -37,7 +51,7 @@ macro_rules! define_tokens {
         }
 
         impl TokenKind {
-            /// 获取 Token 的字面量表示 
+            /// 获取 Token 的字面量表示
             pub fn as_str(&self) -> &'static str {
                 match self {
                     TokenKind::EOF => "EOF",
@@ -81,9 +95,9 @@ define_tokens! {
 
         // 值
         "true"  => True,  "false" => False,
-        "self"  => SelfVal, 
+        "self"  => SelfVal,
 
-        // 逻辑与位运算 
+        // 逻辑与位运算
         "and"   => And,
         "or"    => Or,
         "band"  => BitAnd, // 按位与

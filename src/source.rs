@@ -1,6 +1,17 @@
-/// ======================================================
-/// 1. 基础类型: Span 与FileId
-/// ======================================================
+//    Copyright 2025 Karesis
+//
+//    Licensed under the Apache License, Version 2.0 (the "License");
+//    you may not use this file except in compliance with the License.
+//    You may obtain a copy of the License at
+//
+//        http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing, software
+//    distributed under the License is distributed on an "AS IS" BASIS,
+//    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//    See the License for the specific language governing permissions and
+//    limitations under the License.
+
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -96,7 +107,10 @@ pub struct SourceManager {
 
 impl SourceManager {
     pub fn new() -> Self {
-        Self { files: Vec::new(), next_offset: 0}
+        Self {
+            files: Vec::new(),
+            next_offset: 0,
+        }
     }
 
     /// 加载文件并返回 ID
@@ -104,20 +118,25 @@ impl SourceManager {
         let path = path.as_ref();
         let abs_path = fs::canonicalize(path)?;
 
-        if let Some((id, _)) = self.files.iter().enumerate().find(|(_, f)| f.path == abs_path) {
+        if let Some((id, _)) = self
+            .files
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.path == abs_path)
+        {
             return Ok(FileId(id));
         }
 
         let src = fs::read_to_string(&abs_path)?;
         let len = src.len();
-        
+
         // 分配全局偏移量
         let start_pos = self.next_offset;
         // 更新下一个文件的起点（+1 是为了避免粘连，虽然没啥必要）
-        self.next_offset += len + 1; 
+        self.next_offset += len + 1;
 
         let file = SourceFile::new(abs_path, src, start_pos);
-        
+
         let id = FileId(self.files.len());
         self.files.push(file);
         Ok(id)
