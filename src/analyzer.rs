@@ -1392,6 +1392,35 @@ impl Analyzer {
                 Some((-(val as i64)) as u64) 
             },
 
+            ExpressionKind::Cast { expr: src_expr, .. } => {
+                let val = self.eval_constant_expr(src_expr)?;
+                
+                // 获取 Cast 表达式的目标类型 (check_expr 已经计算并记录了)
+                if let Some(target_key) = self.ctx.types.get(&expr.id) {
+                    match target_key {
+                        // 1. 如果目标是整数，模拟位宽截断 (Truncate)
+                        // 这对于计算掩码很重要 (e.g. val & 0xFF)
+                        TypeKey::Primitive(p) => {
+                            match p {
+                                PrimitiveType::U8 | PrimitiveType::I8 => Some(val & 0xFF),
+                                PrimitiveType::U16 | PrimitiveType::I16 => Some(val & 0xFFFF),
+                                PrimitiveType::U32 | PrimitiveType::I32 => Some(val & 0xFFFFFFFF),
+                                // 64位及其他保留原值
+                                _ => Some(val)
+                            }
+                        }
+                        // 2. 如果目标是指针 (如 0xB8000 as *u16)，保留地址值
+                        TypeKey::Pointer(..) => Some(val),
+                        
+                        // 其他情况 (如转 Float)，暂不支持常量求值
+                        _ => Some(val) 
+                    }
+                } else {
+                    // 理论上 check_expr 应该已经填好类型了，防守性策略：直接返回
+                    Some(val)
+                }
+            },
+
             // 其他情况（函数调用等）不是常量
             _ => None,
         }

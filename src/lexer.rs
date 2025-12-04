@@ -157,15 +157,17 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_number(&mut self) -> Token {
-        // 1. 检查是否是 0x, 0b, 0o
-        if self.src[self.current_pos..].starts_with('0') {
-            let mut lookahead = self.chars.clone();
-            lookahead.next(); // 0
-            if let Some(c) = lookahead.next() {
+        // 1. 检查起始字符是否为 '0'
+        // 注意：self.start_pos 是当前 Token 的起始位置，即 '0' 的位置
+        let start_char = self.src.as_bytes()[self.start_pos] as char;
+
+        if start_char == '0' {
+            // 只有以 0 开头，才检查后续是否是 x, b, o
+            // 此时 self.chars.peek() 指向的是 '0' 后面的那个字符 (例如 'x')
+            if let Some(&c) = self.chars.peek() {
                 match c {
                     'x' | 'X' => {
-                        self.advance(); // 0
-                        self.advance(); // x
+                        self.advance(); // 消耗 x
                         // 扫描 Hex 数字 (0-9, a-f, A-F, _)
                         while let Some(&c) = self.chars.peek() {
                             if c.is_ascii_hexdigit() || c == '_' {
@@ -177,8 +179,7 @@ impl<'a> Lexer<'a> {
                         return self.make_token(TokenKind::Integer);
                     }
                     'b' | 'B' => {
-                        self.advance(); // 0
-                        self.advance(); // b
+                        self.advance(); // 消耗 b
                         // 扫描 Bin 数字 (0-1, _)
                         while let Some(&c) = self.chars.peek() {
                             if c == '0' || c == '1' || c == '_' {
@@ -190,8 +191,7 @@ impl<'a> Lexer<'a> {
                         return self.make_token(TokenKind::Integer);
                     }
                     'o' | 'O' => {
-                        self.advance(); // 0
-                        self.advance(); // o
+                        self.advance(); // 消耗 o
                         // 扫描 Oct 数字 (0-7, _)
                         while let Some(&c) = self.chars.peek() {
                             if (c >= '0' && c <= '7') || c == '_' {
@@ -202,12 +202,14 @@ impl<'a> Lexer<'a> {
                         }
                         return self.make_token(TokenKind::Integer);
                     }
-                    _ => {} // 只是普通的 0 开头数字
+                    _ => {} // 后面不是 x/b/o，那是普通的 0 或者 0.123
                 }
             }
         }
 
-        // 2. 普通十进制扫描 (原逻辑)
+        // 2. 普通十进制扫描 (处理剩下的数字)
+        // 如果是 0xB8...，上面的分支会返回，不会走到这里
+        // 如果是 123，会走到这里
         while let Some(&c) = self.chars.peek() {
             if c.is_ascii_digit() || c == '_' {
                 self.advance();
@@ -216,7 +218,7 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        // 3. 扫描小数部分 (原逻辑)
+        // 3. 扫描小数部分
         if let Some(&'.') = self.chars.peek() {
             let mut iter_clone = self.chars.clone();
             iter_clone.next(); 
