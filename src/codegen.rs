@@ -246,14 +246,20 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
              if let TypeKey::Primitive(PrimitiveType::Unit) = **r {
                  self.context.void_type().fn_type(&param_types, func.is_variadic) // <--- Use AST flag
              } else {
-                 let ret_ty = self.compile_type(r).unwrap();
-                 ret_ty.fn_type(&param_types, func.is_variadic) // <--- Use AST flag
+                let ret_ty = self.compile_type(r).unwrap();
+                ret_ty.fn_type(&param_types, func.is_variadic) // <--- Use AST flag
              }
         } else {
-             self.context.void_type().fn_type(&param_types, func.is_variadic) // <--- Use AST flag
+            self.context.void_type().fn_type(&param_types, func.is_variadic) // <--- Use AST flag
         };
 
-        let val = self.module.add_function(&func.name.name, fn_type, None);
+        // 优先查 mangled_names，如果查不到（理论上不应发生），回退到原始名
+        let fn_name = self.analyzer.mangled_names.get(&func.id)
+            .cloned()
+            .unwrap_or(func.name.name.clone());
+
+        // 使用 fn_name 而不是 func.name.name
+        let val = self.module.add_function(&fn_name, fn_type, None);
         self.functions.insert(func.id, val);
     }
 

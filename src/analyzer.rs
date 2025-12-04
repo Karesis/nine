@@ -69,6 +69,7 @@ pub struct AnalysisContext {
     /// Key: DefId (VariableDeclaration 或 Parameter 的 ID)
     /// Value: Mutability
     pub mutabilities: HashMap<DefId, Mutability>,
+    pub mangled_names: HashMap<DefId, String>,
     pub errors: Vec<AnalyzeError>,
 }
 
@@ -81,6 +82,7 @@ impl AnalysisContext {
             types: HashMap::new(),
             struct_fields: HashMap::new(),
             mutabilities: HashMap::new(),
+            mangled_names: HashMap::new(),
             errors: Vec::new(),
         }
     }
@@ -100,6 +102,7 @@ pub struct Analyzer {
     pub ctx: AnalysisContext,
     pub scopes: Vec<Scope>,
     pub current_return_type: Option<TypeKey>,
+    pub module_path: Vec<String>,
 }
 
 impl Analyzer {
@@ -108,6 +111,7 @@ impl Analyzer {
             ctx: AnalysisContext::new(),
             scopes: Vec::new(),
             current_return_type: None,
+            module_path: Vec::new(),
         }
     }
 
@@ -146,13 +150,19 @@ impl Analyzer {
                 // --- 模块 ---
                 ItemKind::ModuleDecl { name, items: sub_items, .. } => {
                     self.define_symbol(name.name.clone(), item.id, name.span);
-                    
-                    // 【新增】给模块名注册类型，这样 math::add 里的 math 才有类型
                     self.record_type(item.id, TypeKey::Named(item.id));
 
                     if let Some(subs) = sub_items {
                         self.enter_scope(ScopeKind::Module);
+                        
+                        // 【修改】压入路径栈
+                        self.module_path.push(name.name.clone());
+                        
                         self.scan_declarations(subs); 
+                        
+                        // 【修改】弹出路径栈
+                        self.module_path.pop();
+                        
                         let module_scope = self.exit_scope();
                         self.ctx.namespace_scopes.insert(item.id, module_scope);
                     }
@@ -198,7 +208,13 @@ impl Analyzer {
                 // --- 函数 / 类型别名 ---
                 ItemKind::FunctionDecl(def) => {
                     self.define_symbol(def.name.name.clone(), def.id, def.name.span);
+                    
+                    // 【新增】生成并记录修饰名
+                    // 比如 math 模块下的 add -> math_add
+                    let mangled = self.generate_mangled_name(&def.name.name);
+                    self.ctx.mangled_names.insert(def.id, mangled);
                 }
+
                 ItemKind::Typedef { name, .. } | ItemKind::TypeAlias { name, .. } => {
                     self.define_symbol(name.name.clone(), item.id, name.span);
                 }
@@ -227,20 +243,59 @@ impl Analyzer {
     fn scan_implementations(&mut self, items: &[Item]) {
         for item in items {
              match &item.kind {
-                ItemKind::ModuleDecl { items: sub_items, .. } => {
+                ItemKind::ModuleDecl { name, items: sub_items, .. } => {
                     if let Some(subs) = sub_items {
                         if let Some(scope) = self.ctx.namespace_scopes.get(&item.id) {
                             self.scopes.push(scope.clone());
+                            
+                            // 【新增】压入模块路径
+                            self.module_path.push(name.name.clone());
+                            
                             self.scan_implementations(subs);
+                            
+                            // 【新增】弹出模块路径
+                            self.module_path.pop();
+                            
                             self.scopes.pop();
                         }
                     }
                 }
 
+                ItemKind::StructDecl(def) => {
+                    let type_name = &def.name.name;
+                    for m in &def.static_methods {
+                        let combined_name = format!("{}_{}", type_name, m.name.name);
+                        let mangled = self.generate_mangled_name(&combined_name);
+                        self.ctx.mangled_names.insert(m.id, mangled);
+                    }
+                }
+                
+                ItemKind::EnumDecl(def) => {
+                    let type_name = &def.name.name;
+                    for m in &def.static_methods {
+                        let combined_name = format!("{}_{}", type_name, m.name.name);
+                        let mangled = self.generate_mangled_name(&combined_name);
+                        self.ctx.mangled_names.insert(m.id, mangled);
+                    }
+                }
+                
                 ItemKind::Implementation { target_type, methods } => {
                     // 1. 计算 Key
                     let key = self.resolve_ast_type(target_type);
                     if let TypeKey::Error = key { continue; }
+
+                    // 2. 【新增】生成修饰名并注册
+                    let type_name = self.get_mangling_type_name(target_type);
+                    
+                    for method in methods {
+                        // 格式：StructName_MethodName
+                        // generate_mangled_name 会自动加上模块前缀：Module_StructName_MethodName
+                        let combined_name = format!("{}_{}", type_name, method.name.name);
+                        let mangled = self.generate_mangled_name(&combined_name);
+                        
+                        // 注册到 mangled_names 表，供 Codegen 使用
+                        self.ctx.mangled_names.insert(method.id, mangled);
+                    }
 
                     // 2. 【Clone】取出当前的注册表（复印件）
                     // 此时 self 的借用立即结束
@@ -1186,5 +1241,37 @@ impl Analyzer {
     
     fn exit_scope(&mut self) -> Scope {
         self.scopes.pop().expect("Scope unbalanced!")
+    }
+
+    fn generate_mangled_name(&self, name: &str) -> String {
+        // 入口函数 main 不修饰
+        if name == "main" {
+            return name.to_string();
+        }
+        
+        // 如果在根模块，直接返回名字
+        if self.module_path.is_empty() {
+            return name.to_string();
+        }
+
+        // 拼接：mod_submod_name
+        let prefix = self.module_path.join("_");
+        format!("{}_{}", prefix, name)
+    }
+
+    // 辅助：从 AST 类型中提取用于修饰名字的基础名称
+    // 例如：Type(Path(Vector)) -> "Vector"
+    //      Type(Pointer(Vector)) -> "Vector"
+    fn get_mangling_type_name(&self, ty: &Type) -> String {
+        match &ty.kind {
+            TypeKind::Named(path) => {
+                // 取路径的最后一段，例如 std::io::File -> File
+                path.segments.last().unwrap().name.clone()
+            },
+            TypeKind::Pointer { inner, .. } => self.get_mangling_type_name(inner),
+            TypeKind::Array { inner, .. } => format!("Arr_{}", self.get_mangling_type_name(inner)), // 简单处理
+            TypeKind::Primitive(p) => format!("{:?}", p), // e.g. "I32"
+            _ => "Unknown".to_string(),
+        }
     }
 }
