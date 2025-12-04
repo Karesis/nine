@@ -19,7 +19,7 @@
 ## 🛠️ Quick Start
 
 ### Prerequisites
-- LLVM 15+ installed.
+- LLVM 20+ installed.
 - Rust toolchain (cargo).
 
 ### Installation

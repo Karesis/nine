@@ -1,0 +1,14 @@
+// main.9
+// 声明模块
+mod math;
+mod printer;
+
+fn main() -> i32 {
+    // 调用同级模块函数 (math.9)
+    mut sum: i32 = math::add(10, 32); // 42
+
+    // 调用子文件夹模块函数 (printer/entry.9)
+    printer::print_res(sum);
+
+    ret sum;
+}

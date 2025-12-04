@@ -1,0 +1,6 @@
+// printer/entry.9
+extern fn printf(fmt: ^u8, ...) -> i32;
+
+pub fn print_res(val: i32) {
+    printf("Result from modules: %d\n", val);
+}
