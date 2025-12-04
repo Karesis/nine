@@ -1,0 +1,48 @@
+// demo/linked_list.9
+
+// 1. C FFI 定义
+extern fn malloc(size: u64) -> ^u8;
+extern fn free(ptr: ^u8);
+extern fn printf(fmt: ^u8, ...) -> i32;
+
+// 2. 常量定义 (Nine Lang Way: 显式定义 NULL)
+const NULL_NODE: *Node = 0 as *Node;
+
+// 3. 结构体定义
+struct Node {
+    val: i32;
+    next: *Node; // 指向可变节点的指针 (mut_ptr)
+}
+
+fn create_node(v: i32) -> *Node {
+    set ptr: *Node = malloc(@sizeof(Node)) as *Node;
+    
+    // 使用后缀 ^ 解引用，访问成员
+    ptr^.val = v;
+    ptr^.next = NULL_NODE; 
+    
+    ret ptr;
+}
+
+fn main() -> i32 {
+    set head: *Node = create_node(10);
+    set second: *Node = create_node(20);
+    
+    // 链接节点
+    head^.next = second;
+
+    // 遍历
+    mut curr: *Node = head;
+    
+    // 显式判空
+    while (curr != NULL_NODE) {
+        printf("Value: %d\n", curr^.val);
+        curr = curr^.next;
+    }
+    
+    // 释放内存
+    free(second as ^u8);
+    free(head as ^u8);
+    
+    ret 0;
+}

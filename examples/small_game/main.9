@@ -1,0 +1,41 @@
+// src/main.9
+
+// 引入 C 函数
+extern fn malloc(size: u64) -> ^u8;
+extern fn printf(fmt: ^u8, ...) -> i32;
+
+// 引入模块
+mod entity;
+
+// 引入 entity 里的 Player
+use entity::Player; 
+
+fn main() -> i32 {
+    // 静态方法调用
+    set hero: *Player = Player::new("Hero", 100, 15);
+    set monster: *Player = Player::new("Goblin", 40, 5);
+
+    printf("--- Battle Start ---\n");
+
+    // 模拟回合制战斗
+    while (hero.is_alive() and monster.is_alive()) {
+        // 测试方法调用语法糖 
+        hero.attack(monster);
+        
+        if (monster.is_alive()) {
+            monster.attack(hero);
+        }
+        
+        printf("Status -> Hero: %d/%d, Monster: %d/%d\n", 
+               hero^.hp, hero^.max_hp, 
+               monster^.hp, monster^.max_hp);
+    }
+
+    if (hero.is_alive()) {
+        printf("Victory!\n");
+    } else {
+        printf("Defeat...\n");
+    }
+
+    ret 0;
+}

@@ -1,0 +1,21 @@
+// demo/layout_test.9
+
+extern fn printf(fmt: ^u8, ...) -> i32;
+
+struct Mixed {
+    a: u8;   // offset 0, size 1
+             // padding 3 bytes (align to 4)
+    b: i32;  // offset 4, size 4
+    c: u8;   // offset 8, size 1
+             // padding 7 bytes (align to 8)
+    d: i64;  // offset 16, size 8
+} 
+// Total Size: 24
+// Alignment: 8
+
+const SIZE_TEST: u64 = @sizeof(Mixed);
+
+fn main() {
+    // 如果算法对，这里应该打印 24
+    printf("Size: %d\n", SIZE_TEST); 
+}

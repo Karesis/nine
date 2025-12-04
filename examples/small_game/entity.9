@@ -1,0 +1,40 @@
+// src/entity.9
+
+// 公开的结构体
+pub struct Player {
+    name: ^u8;
+    hp: i32;
+    max_hp: i32;
+    ad: i32; // Attack Damage
+
+    // 静态构造函数 
+    pub fn new(n: ^u8, health: i32, dmg: i32) -> *Player {
+        set p: *Player = malloc(@sizeof(Player)) as *Player;
+        p^.name = n;
+        p^.hp = health;
+        p^.max_hp = health;
+        p^.ad = dmg;
+        ret p;
+    }
+}
+
+imp for *Player {
+    // 实例方法 
+    pub fn is_alive(self) -> bool {
+        if (self^.hp > 0) { ret true; }
+        ret false;
+    }
+
+    pub fn take_damage(mut self, dmg: i32) {
+        self^.hp = self^.hp - dmg;
+        if (self^.hp < 0) {
+            self^.hp = 0;
+        }
+    }
+    
+    // 模拟攻击逻辑
+    pub fn attack(self, mut target: *Player) {
+        printf("%s attacks %s for %d damage!\n", self^.name, target^.name, self^.ad);
+        target.take_damage(self^.ad); 
+    }
+}

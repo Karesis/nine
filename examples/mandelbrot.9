@@ -1,0 +1,44 @@
+// demo/mandelbrot.9
+extern fn putchar(c: i32) -> i32;
+
+fn main() -> i32 {
+    mut y: i32 = -12; 
+    
+    while (y < 12) {
+        mut x: i32 = -39;
+        while (x < 39) {
+            mut ca: i32 = (x * 229) / 100; 
+            mut cb: i32 = (y * 416) / 100;
+            mut a: i32 = ca;
+            mut b: i32 = cb;
+            mut i: i32 = 0;
+            
+            while (i < 100) { 
+                set aa: i32 = ((a * a) / 100) - ((b * b) / 100);
+                set bb: i32 = (2 * a * b) / 100;
+                a = aa + ca;
+                b = bb + cb;
+                
+                if ((a * a) + (b * b) > 40000) { 
+                    break;
+                }
+                i = i + 1;
+            }
+            
+            if (i > 99) { 
+                putchar(32); // ' '
+            } else {
+                if (i > 30) { 
+                    putchar(46); // '.'
+                } else { 
+                    putchar(35); // '#'
+                }
+            }
+            
+            x = x + 1;
+        }
+        putchar(10); // \n
+        y = y + 1;
+    }
+    ret 0;
+}
