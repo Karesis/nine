@@ -12,6 +12,8 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env: 
+      LLVM_SYS_201_PREFER_DYNAMIC: "1"
 
     steps:
     - uses: actions/checkout@v6
