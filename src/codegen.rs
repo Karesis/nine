@@ -444,39 +444,41 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 else_branch,
             } => {
                 let parent = self.get_current_function();
-                let then_bb = self.context.append_basic_block(parent, "then");
-                let else_bb = self.context.append_basic_block(parent, "else");
-                let merge_bb = self.context.append_basic_block(parent, "merge");
+                
+                // 1. 创建基本块
+                let then_bb = self.context.append_basic_block(parent, "if_then");
+                let else_bb = self.context.append_basic_block(parent, "if_else");
+                let merge_bb = self.context.append_basic_block(parent, "if_merge");
 
+                // 2. 编译条件跳转
                 let cond_val = self.compile_expr(condition)?.into_int_value();
-                let actual_else = if else_branch.is_some() {
-                    else_bb
-                } else {
-                    merge_bb
-                };
+                
+                // 如果有 else 分支，跳 else_bb；否则跳 merge_bb
+                let actual_else = if else_branch.is_some() { else_bb } else { merge_bb };
+                
+                self.builder.build_conditional_branch(cond_val, then_bb, actual_else).ok();
 
-                self.builder
-                    .build_conditional_branch(cond_val, then_bb, actual_else)
-                    .ok();
-
-                // Then
+                // 3. 编译 Then 分支
                 self.builder.position_at_end(then_bb);
                 self.compile_block(then_block)?;
-                if !self.block_terminated(then_block) {
+                // 检查当前 block (可能是 then_block 里的最后一个 block) 是否已经结束
+                // ompile_block 可能会产生新的 basic block，所以我们要检查 builder 当前所在的 block
+                if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                     self.builder.build_unconditional_branch(merge_bb).ok();
                 }
 
-                // Else
+                // 4. 编译 Else 分支
                 if let Some(else_stmt) = else_branch {
                     self.builder.position_at_end(else_bb);
                     self.compile_stmt(else_stmt)?;
-                    // 如果当前块没结束指令就跳 merge
-                    //? 完整的terminator检查？
-                    if then_bb.get_terminator().is_none() {
+                    
+                    // 检查 Else 分支编译完后，当前所在的 block 是否有终结指令
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                         self.builder.build_unconditional_branch(merge_bb).ok();
                     }
                 }
 
+                // 5. 移动到 Merge 继续
                 self.builder.position_at_end(merge_bb);
                 Ok(())
             }
@@ -1208,7 +1210,6 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     .const_zero()
                     .as_basic_value_enum())
             }
-            _ => Err("Invalid call return kind".into()),
         }
     }
 

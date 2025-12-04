@@ -872,22 +872,62 @@ impl Analyzer {
             ExpressionKind::Binary { lhs, op, rhs } => {
                 let lhs_ty = self.check_expr(lhs);
                 let rhs_ty = self.check_expr(rhs);
-                self.check_type_match(&lhs_ty, &rhs_ty, expr.span);
 
-                // 尝试双向固化字面量
-                // 如果 lhs 是 i32 变量，rhs 是字面量 50，这里会把 50 固化为 i32
-                self.coerce_literal_type(rhs.id, &lhs_ty, &rhs_ty);
-                // 反之亦然（例如 50 + x）
-                self.coerce_literal_type(lhs.id, &rhs_ty, &lhs_ty);
+                // --- 类型统一逻辑 ---
+                let common_type = match (&lhs_ty, &rhs_ty) {
+                    // 1. 类型完全相同：直接通过
+                    (t1, t2) if t1 == t2 => t1.clone(),
 
+                    // 2. 左边是字面量，右边是具体整数：右边说了算
+                    // e.g. 2 * a (i32) -> 结果为 i32
+                    (TypeKey::IntegerLiteral(val), TypeKey::Primitive(p)) if self.is_integer_type(p) => {
+                        if !self.check_int_range(*p, *val) {
+                            self.error(format!("Literal {} out of range for {:?}", val, p), expr.span);
+                        }
+                        rhs_ty.clone()
+                    }
+
+                    // 3. 左边是具体整数，右边是字面量：左边说了算
+                    // e.g. a (i32) * 2 -> 结果为 i32
+                    (TypeKey::Primitive(p), TypeKey::IntegerLiteral(val)) if self.is_integer_type(p) => {
+                        if !self.check_int_range(*p, *val) {
+                            self.error(format!("Literal {} out of range for {:?}", val, p), expr.span);
+                        }
+                        lhs_ty.clone()
+                    }
+
+                    // 4. 浮点数同理 (FloatLiteral vs Primitive)
+                    (TypeKey::FloatLiteral(_), TypeKey::Primitive(p)) if matches!(p, PrimitiveType::F32 | PrimitiveType::F64) => {
+                        rhs_ty.clone()
+                    }
+                    (TypeKey::Primitive(p), TypeKey::FloatLiteral(_)) if matches!(p, PrimitiveType::F32 | PrimitiveType::F64) => {
+                        lhs_ty.clone()
+                    }
+
+                    // 5. 无法统一 (比如 i32 + i64，或者 i32 + bool)
+                    _ => {
+                        // 复用 check_type_match 产生报错信息
+                        self.check_type_match(&lhs_ty, &rhs_ty, expr.span);
+                        TypeKey::Error
+                    }
+                };
+                
+                // 2. 双向固化：将类型信息回写到 AST
+                self.coerce_literal_type(lhs.id, &common_type, &lhs_ty);
+                self.coerce_literal_type(rhs.id, &common_type, &rhs_ty);
+
+                // 3. 返回结果类型
                 match op {
+                    // 比较运算永远返回 Bool
                     BinaryOperator::Equal
                     | BinaryOperator::NotEqual
                     | BinaryOperator::Less
                     | BinaryOperator::Greater
                     | BinaryOperator::LessEqual
                     | BinaryOperator::GreaterEqual => TypeKey::Primitive(PrimitiveType::Bool),
-                    _ => lhs_ty,
+                    
+                    // 算术运算返回统一后的类型
+                    _ => common_type,
                 }
             }
 
