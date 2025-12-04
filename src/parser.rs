@@ -915,7 +915,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let expr = self.parse_expr()?;
                 self.expect(TokenKind::RParen)?;
-                Ok(expr) 
+                Ok(expr)
             }
 
             // 路径 OR 结构体初始化
@@ -1515,45 +1515,45 @@ impl<'a> Parser<'a> {
                     span: func_def.span,
                     kind: ItemKind::FunctionDecl(func_def),
                 });
-            } 
+            }
             // Case B: extern var name: Type;
             // 复用 parse_global_variable 的逻辑，但需要标记它是 extern
             // 我们可以稍微 hack 一下：extern var 其实就是没有初始化的 global variable
             // 但我们需要 ItemKind::GlobalVariable 能够区分是否是 extern
             else if self.match_token(&[TokenKind::Set, TokenKind::Mut, TokenKind::Const]) {
-                 // 这里需要小心：parse_global_variable 目前强制要求初始化（除非是 mut）
-                 // 且 parse_global_variable 内部不处理 extern 逻辑。
-                 // 为了简单，我们手动解析一下 extern var
-                 
-                 let modifier = match self.previous_kind {
-                     TokenKind::Set => Mutability::Immutable,
-                     TokenKind::Mut => Mutability::Mutable,
-                     TokenKind::Const => Mutability::Constant,
-                     _ => unreachable!(),
-                 };
-                 
-                 let name = self.parse_identifier()?;
-                 self.expect(TokenKind::Colon)?;
-                 let ty = self.parse_type()?;
-                 let end = self.expect(TokenKind::Semi)?.span.end;
-                 
-                 // 我们需要 ItemKind 增加一个 ExternVariable 或者复用 GlobalVariable 但带标记
-                 // 建议复用 GlobalVariable，但在 GlobalDefinition 结构体加个 is_extern
-                 return Ok(Item {
-                     id: self.next_id(),
-                     kind: ItemKind::GlobalVariable(GlobalDefinition {
-                         name,
-                         ty,
-                         modifier,
-                         initializer: None, // extern 变量没有初始化器
-                         is_extern: true,   // <--- 需要在 AST 中添加这个字段！
-                         span: Span::new(start, end),
-                         is_pub,
-                     }),
-                     span: Span::new(start, end),
-                 });
+                // 这里需要小心：parse_global_variable 目前强制要求初始化（除非是 mut）
+                // 且 parse_global_variable 内部不处理 extern 逻辑。
+                // 为了简单，我们手动解析一下 extern var
+
+                let modifier = match self.previous_kind {
+                    TokenKind::Set => Mutability::Immutable,
+                    TokenKind::Mut => Mutability::Mutable,
+                    TokenKind::Const => Mutability::Constant,
+                    _ => unreachable!(),
+                };
+
+                let name = self.parse_identifier()?;
+                self.expect(TokenKind::Colon)?;
+                let ty = self.parse_type()?;
+                let end = self.expect(TokenKind::Semi)?.span.end;
+
+                // 我们需要 ItemKind 增加一个 ExternVariable 或者复用 GlobalVariable 但带标记
+                // 建议复用 GlobalVariable，但在 GlobalDefinition 结构体加个 is_extern
+                return Ok(Item {
+                    id: self.next_id(),
+                    kind: ItemKind::GlobalVariable(GlobalDefinition {
+                        name,
+                        ty,
+                        modifier,
+                        initializer: None, // extern 变量没有初始化器
+                        is_extern: true,   // <--- 需要在 AST 中添加这个字段！
+                        span: Span::new(start, end),
+                        is_pub,
+                    }),
+                    span: Span::new(start, end),
+                });
             }
-            
+
             return Err(ParseError {
                 expected: "fn or variable declaration".into(),
                 found: self.peek().kind,
@@ -1649,7 +1649,11 @@ impl<'a> Parser<'a> {
 
         Ok(Item {
             id: self.next_id(),
-            kind: ItemKind::Typedef { name, target_type, is_pub},
+            kind: ItemKind::Typedef {
+                name,
+                target_type,
+                is_pub,
+            },
             span: Span::new(start, end),
         })
     }
@@ -1664,7 +1668,11 @@ impl<'a> Parser<'a> {
 
         Ok(Item {
             id: self.next_id(),
-            kind: ItemKind::TypeAlias { name, target_type, is_pub},
+            kind: ItemKind::TypeAlias {
+                name,
+                target_type,
+                is_pub,
+            },
             span: Span::new(start, end),
         })
     }

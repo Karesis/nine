@@ -189,14 +189,18 @@ impl Analyzer {
                     is_pub,
                     ..
                 } => {
-                    let vis = if *is_pub { Visibility::Public } else { Visibility::Private };
+                    let vis = if *is_pub {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
                     self.define_symbol(name.name.clone(), item.id, vis, name.span);
                     self.record_type(item.id, TypeKey::Named(item.id));
 
                     if let Some(subs) = sub_items {
                         self.enter_scope(ScopeKind::Module);
                         self.module_path.push(name.name.clone());
-                        
+
                         self.scan_declarations(subs);
 
                         self.module_path.pop();
@@ -207,9 +211,13 @@ impl Analyzer {
 
                 // --- 结构体 ---
                 ItemKind::StructDecl(def) => {
-                    let vis = if def.is_pub { Visibility::Public } else { Visibility::Private };
+                    let vis = if def.is_pub {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
                     self.define_symbol(def.name.name.clone(), item.id, vis, def.name.span);
-                    
+
                     self.record_type(item.id, TypeKey::Named(item.id));
                     // 辅助函数也需要更新 (见下方)
                     self.register_static_methods(item.id, &def.static_methods);
@@ -217,36 +225,48 @@ impl Analyzer {
 
                 // --- 联合体 ---
                 ItemKind::UnionDecl(def) => {
-                    let vis = if def.is_pub { Visibility::Public } else { Visibility::Private };
+                    let vis = if def.is_pub {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
                     self.define_symbol(def.name.name.clone(), item.id, vis, def.name.span);
-                    
+
                     self.record_type(item.id, TypeKey::Named(item.id));
                     self.register_static_methods(item.id, &def.static_methods);
                 }
 
                 // --- 枚举 ---
                 ItemKind::EnumDecl(def) => {
-                    let vis = if def.is_pub { Visibility::Public } else { Visibility::Private };
+                    let vis = if def.is_pub {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
                     self.define_symbol(def.name.name.clone(), item.id, vis, def.name.span);
-                    
+
                     self.record_type(item.id, TypeKey::Named(item.id));
-                    
+
                     let mut enum_scope = Scope::new(ScopeKind::Module);
-                    
+
                     // 1. 注册变体 (Variants)
                     // 枚举变体通常跟随枚举本身的可见性，或者是 Public 的
                     // 这里我们设定变体在枚举命名空间内是 Public 的
                     for variant in &def.variants {
                         enum_scope.symbols.insert(
-                            variant.name.name.clone(), 
-                            (variant.id, Visibility::Public) // <--- 修改：存入元组
+                            variant.name.name.clone(),
+                            (variant.id, Visibility::Public), // <--- 修改：存入元组
                         );
                     }
-                    
+
                     // 2. 注册静态方法
                     for method in &def.static_methods {
-                        let m_vis = if method.is_pub { Visibility::Public } else { Visibility::Private };
-                        
+                        let m_vis = if method.is_pub {
+                            Visibility::Public
+                        } else {
+                            Visibility::Private
+                        };
+
                         if enum_scope.symbols.contains_key(&method.name.name) {
                             self.error(
                                 format!("Duplicate name '{}' in enum", method.name.name),
@@ -254,8 +274,8 @@ impl Analyzer {
                             );
                         } else {
                             enum_scope.symbols.insert(
-                                method.name.name.clone(), 
-                                (method.id, m_vis) // <--- 修改：存入元组
+                                method.name.name.clone(),
+                                (method.id, m_vis), // <--- 修改：存入元组
                             );
                         }
                     }
@@ -264,7 +284,11 @@ impl Analyzer {
 
                 // --- 函数 ---
                 ItemKind::FunctionDecl(def) => {
-                    let vis = if def.is_pub { Visibility::Public } else { Visibility::Private };
+                    let vis = if def.is_pub {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
                     self.define_symbol(def.name.name.clone(), item.id, vis, def.name.span);
 
                     let mangled = if def.is_extern {
@@ -276,14 +300,23 @@ impl Analyzer {
                 }
 
                 // --- 类型别名 ---
-                ItemKind::Typedef { name, is_pub, .. } | ItemKind::TypeAlias { name, is_pub, .. } => {
-                    let vis = if *is_pub { Visibility::Public } else { Visibility::Private };
+                ItemKind::Typedef { name, is_pub, .. }
+                | ItemKind::TypeAlias { name, is_pub, .. } => {
+                    let vis = if *is_pub {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
                     self.define_symbol(name.name.clone(), item.id, vis, name.span);
                 }
 
                 // --- 全局变量 ---
                 ItemKind::GlobalVariable(def) => {
-                    let vis = if def.is_pub { Visibility::Public } else { Visibility::Private };
+                    let vis = if def.is_pub {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
                     self.define_symbol(def.name.name.clone(), item.id, vis, def.name.span);
 
                     let mangled = if def.is_extern {
@@ -302,8 +335,12 @@ impl Analyzer {
         // --- Loop 2: 处理导入 (Use) ---
         for item in items {
             // 注意这里解构出了 is_pub
-            if let ItemKind::Import { path, alias, is_pub } = &item.kind {
-                
+            if let ItemKind::Import {
+                path,
+                alias,
+                is_pub,
+            } = &item.kind
+            {
                 // 1. 尝试解析路径
                 if let Some(target_id) = self.resolve_path(path) {
                     // 2. 决定引入的名字
@@ -314,7 +351,11 @@ impl Analyzer {
                     };
 
                     // 3. 决定可见性 (Pub Use 支持)
-                    let vis = if *is_pub { Visibility::Public } else { Visibility::Private };
+                    let vis = if *is_pub {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
 
                     // 4. 注册符号 (传入 vis)
                     self.define_symbol(name, target_id, vis, path.span);
@@ -326,7 +367,10 @@ impl Analyzer {
                     }
                 } else {
                     self.error(
-                        format!("Cannot resolve import '{:?}'", path.segments.last().unwrap().name),
+                        format!(
+                            "Cannot resolve import '{:?}'",
+                            path.segments.last().unwrap().name
+                        ),
                         path.span,
                     );
                 }
@@ -338,10 +382,14 @@ impl Analyzer {
     // 必须更新以匹配 Scope 的 (DefId, Visibility) 结构
     fn register_static_methods(&mut self, item_id: DefId, methods: &[FunctionDefinition]) {
         let mut static_scope = Scope::new(ScopeKind::Module);
-        
+
         for method in methods {
             // 获取方法的可见性
-            let m_vis = if method.is_pub { Visibility::Public } else { Visibility::Private };
+            let m_vis = if method.is_pub {
+                Visibility::Public
+            } else {
+                Visibility::Private
+            };
 
             if static_scope.symbols.contains_key(&method.name.name) {
                 self.error(
@@ -349,10 +397,9 @@ impl Analyzer {
                     method.span,
                 );
             } else {
-                static_scope.symbols.insert(
-                    method.name.name.clone(), 
-                    (method.id, m_vis) 
-                );
+                static_scope
+                    .symbols
+                    .insert(method.name.name.clone(), (method.id, m_vis));
             }
         }
         self.ctx.namespace_scopes.insert(item_id, static_scope);
@@ -620,15 +667,15 @@ impl Analyzer {
         match p {
             // === 固定宽度类型 ===
             U8 => val <= u8::MAX as u64,
-            I8 => val <= (i8::MAX as u64) + 1,   // 允许 abs(MIN) 即 128
-            
+            I8 => val <= (i8::MAX as u64) + 1, // 允许 abs(MIN) 即 128
+
             U16 => val <= u16::MAX as u64,
             I16 => val <= (i16::MAX as u64) + 1, // 允许 32768
-            
+
             U32 => val <= u32::MAX as u64,
             I32 => val <= (i32::MAX as u64) + 1, // 允许 2147483648
-            
-            U64 => true, // val 是 u64，永远不会超过 u64
+
+            U64 => true,                         // val 是 u64，永远不会超过 u64
             I64 => val <= (i64::MAX as u64) + 1, // 允许 abs(i64::MIN)
 
             // === 平台相关类型 (Target Dependent) ===
@@ -638,7 +685,7 @@ impl Analyzer {
                     val <= u32::MAX as u64
                 } else {
                     // 64位平台: u64 范围内都行
-                    true 
+                    true
                 }
             }
             ISize => {
@@ -727,7 +774,12 @@ impl Analyzer {
         for param in &func.params {
             let param_type = self.resolve_ast_type(&param.ty);
             self.record_type(param.id, param_type);
-            self.define_symbol(param.name.name.clone(), param.id, Visibility::Private, param.name.span);
+            self.define_symbol(
+                param.name.name.clone(),
+                param.id,
+                Visibility::Private,
+                param.name.span,
+            );
             let mutability = if param.is_mutable {
                 Mutability::Mutable
             } else {
@@ -1305,29 +1357,32 @@ impl Analyzer {
             ExpressionKind::StaticAccess { target, member } => {
                 // 1. 检查 Target 类型
                 let target_ty = self.check_expr(target);
-                
+
                 let container_id = if let TypeKey::Named(id) = target_ty {
                     id
                 } else {
                     self.error(
-                        format!("Expected Struct or Enum type for '::' access, found {:?}", target_ty),
-                        target.span 
+                        format!(
+                            "Expected Struct or Enum type for '::' access, found {:?}",
+                            target_ty
+                        ),
+                        target.span,
                     );
                     return TypeKey::Error;
                 };
 
-                let symbol_info = if let Some(scope) = self.ctx.namespace_scopes.get(&container_id) {
+                let symbol_info = if let Some(scope) = self.ctx.namespace_scopes.get(&container_id)
+                {
                     scope.symbols.get(&member.name).cloned()
                 } else {
                     None
                 };
                 if let Some((def_id, visibility)) = symbol_info {
-                    
                     // --- 可见性检查 ---
                     if visibility == Visibility::Private {
                         self.error(
                             format!("Static member '{}' is private", member.name),
-                            member.span
+                            member.span,
                         );
                         // 即使报错，我们继续往下走，记录类型以防级联报错
                     }
@@ -1343,16 +1398,15 @@ impl Analyzer {
                         // 防御性：符号存在但没有类型记录
                         return TypeKey::Error;
                     }
-
                 } else {
                     // 没找到符号
                     if self.ctx.namespace_scopes.contains_key(&container_id) {
-                         self.error(
+                        self.error(
                             format!("Member '{}' not found in type", member.name),
-                            member.span
+                            member.span,
                         );
                     } else {
-                         self.error("Type has no static members", target.span);
+                        self.error("Type has no static members", target.span);
                     }
                     TypeKey::Error
                 }
@@ -1682,7 +1736,9 @@ impl Analyzer {
     }
 
     fn resolve_path(&mut self, path: &Path) -> Option<DefId> {
-        if path.segments.is_empty() { return None; }
+        if path.segments.is_empty() {
+            return None;
+        }
 
         let first_seg = &path.segments[0];
         let mut current_def_id = None;
@@ -1690,18 +1746,21 @@ impl Analyzer {
         // 1. 查找第一段 (Local Scope)
         // 在本地作用域查找时，不需要检查可见性（自家东西随便用）
         for scope in self.scopes.iter().rev() {
-            if let Some((id, _)) = scope.symbols.get(&first_seg.name) { // 解构元组
+            if let Some((id, _)) = scope.symbols.get(&first_seg.name) {
+                // 解构元组
                 current_def_id = Some(*id);
                 break;
             }
         }
 
-        if current_def_id.is_none() { return None; }
+        if current_def_id.is_none() {
+            return None;
+        }
 
         // 2. 查找后续段 (Drill down)
         for (i, segment) in path.segments.iter().enumerate().skip(1) {
             let parent_id = current_def_id.unwrap();
-            
+
             if let Some(scope) = self.ctx.namespace_scopes.get(&parent_id) {
                 if let Some((child_id, visibility)) = scope.symbols.get(&segment.name) {
                     // 【关键检查】
@@ -1711,11 +1770,11 @@ impl Analyzer {
                     // 对于 v0.1，严格规则：跨层级访问必须是 Public。
                     if *visibility == Visibility::Private {
                         self.error(
-                            format!("Symbol '{}' is private", segment.name), 
-                            segment.span
+                            format!("Symbol '{}' is private", segment.name),
+                            segment.span,
                         );
-                        // 为了避免级联报错，这里返回None 
-                        return None; 
+                        // 为了避免级联报错，这里返回None
+                        return None;
                     }
 
                     current_def_id = Some(*child_id);
@@ -1778,7 +1837,7 @@ impl Analyzer {
             TypeKind::Pointer { inner, .. } => self.get_mangling_type_name(inner),
             TypeKind::Array { inner, size } => {
                 format!("Arr_{}_{}", size, self.get_mangling_type_name(inner))
-            },
+            }
             TypeKind::Primitive(p) => format!("{:?}", p), // e.g. "I32"
             _ => "Unknown".to_string(),
         }

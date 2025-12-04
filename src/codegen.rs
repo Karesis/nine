@@ -111,15 +111,23 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             // 这里的 Panic 是为了捕获 Analyzer 的 Bug。
             // 所有的字面量在进入 Codegen 之前，都必须在 Analyzer 阶段被 coerce_literal_type 固化为 Primitive。
             TypeKey::IntegerLiteral(v) => {
-                panic!("ICE (Internal Compiler Error): Analyzer failed to resolve IntegerLiteral({}) to a concrete type. This is a bug in the compiler.", v);
+                panic!(
+                    "ICE (Internal Compiler Error): Analyzer failed to resolve IntegerLiteral({}) to a concrete type. This is a bug in the compiler.",
+                    v
+                );
             }
             TypeKey::FloatLiteral(bits) => {
                 let v = f64::from_bits(*bits);
-                panic!("ICE (Internal Compiler Error): Analyzer failed to resolve FloatLiteral({}) to a concrete type. This is a bug in the compiler.", v);
+                panic!(
+                    "ICE (Internal Compiler Error): Analyzer failed to resolve FloatLiteral({}) to a concrete type. This is a bug in the compiler.",
+                    v
+                );
             }
 
             // Error 类型也不应该传到 Codegen，Analyzer 应该早就拦截并返回 Err 了
-            TypeKey::Error => panic!("ICE: TypeKey::Error reached Codegen. Compilation should have failed in Analyzer phase."),
+            TypeKey::Error => panic!(
+                "ICE: TypeKey::Error reached Codegen. Compilation should have failed in Analyzer phase."
+            ),
         }
     }
 
@@ -1729,7 +1737,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let name = if def.is_extern {
             def.name.name.clone()
         } else {
-            self.analyzer.mangled_names.get(&id).cloned().unwrap_or(def.name.name.clone())
+            self.analyzer
+                .mangled_names
+                .get(&id)
+                .cloned()
+                .unwrap_or(def.name.name.clone())
         };
 
         // 3. 创建全局变量
