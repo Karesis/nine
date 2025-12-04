@@ -915,7 +915,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let expr = self.parse_expr()?;
                 self.expect(TokenKind::RParen)?;
-                Ok(expr) //? 包裹一个 ParenExpr 节点
+                Ok(expr) 
             }
 
             // 路径 OR 结构体初始化
@@ -1105,7 +1105,6 @@ impl<'a> Parser<'a> {
 
                 // 3. 取出第一个字符
                 // 如果是空字符 '' 给个 \0
-                //? 按理来说拦截了？
                 let c = unescaped_str.chars().next().unwrap_or('\0');
 
                 Ok(Literal::Char(c))
@@ -1461,10 +1460,6 @@ impl<'a> Parser<'a> {
         } else {
             // 是调用/表达式语句: Postfix ";"
             let end_tok = self.expect(TokenKind::Semi)?;
-
-            // "Error: Statement must be an assignment or a function call."
-            //? analyzer 检查了?
-
             Ok(Statement {
                 id: self.next_id(),
                 kind: StatementKind::ExpressionStatement(expr),
