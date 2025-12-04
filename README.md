@@ -4,6 +4,10 @@
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Version](https://img.shields.io/badge/version-0.1.0--alpha-orange)
 
+> [!WARNING]
+> **This project is in early development (Pre-Alpha).**
+> Features are missing, bugs are expected, and the syntax is subject to change.
+
 **Nine Lang** is a modern, statically-typed systems programming language focusing on simplicity, explicit semantics, and module-based organization. Built with Rust and LLVM.
 
 > "A language that bridges the gap between C's simplicity and modern structural needs."
