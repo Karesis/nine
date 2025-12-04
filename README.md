@@ -1,6 +1,6 @@
 # Nine Lang (9-lang)
 
-![Build Status](https://img.shields.io/github/actions/workflow/status/Karesis/lice/rust.yml?branch=main)
+![Build Status](https://img.shields.io/github/actions/workflow/status/Karesis/nine/rust.yml?branch=main)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Version](https://img.shields.io/badge/version-0.1.0--alpha-orange)
 
