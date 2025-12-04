@@ -978,6 +978,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         op: BinaryOperator,
         rhs: &Expression,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+
+        // 如果是逻辑运算，进入短路求值逻辑
+        if matches!(op, BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr) {
+            return self.compile_short_circuit_binary(lhs, op, rhs);
+        }
+
         let lhs_val = self.compile_expr(lhs)?;
         let rhs_val = self.compile_expr(rhs)?;
 
@@ -1069,6 +1075,93 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
 
         Err("Operands type mismatch or unsupported type for binary op".into())
+    }
+
+    fn compile_short_circuit_binary(
+        &mut self,
+        lhs: &Expression,
+        op: BinaryOperator,
+        rhs: &Expression,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let parent = self.get_current_function();
+        let lhs_val = self.compile_expr(lhs)?;
+        
+        // 确保 LHS 是 bool (i1)
+        if !lhs_val.is_int_value() {
+            return Err("Logical op requires boolean/integer operands".into());
+        }
+        let lhs_int = lhs_val.into_int_value();
+        
+        // 如果不是 1 位宽 (i1)，需要跟 0 比较转成 i1
+        let i1_type = self.context.bool_type(); // i1
+        let zero = self.context.i64_type().const_zero();
+        
+        let lhs_bool = if lhs_int.get_type().get_bit_width() > 1 {
+             // val != 0
+             self.builder.build_int_compare(IntPredicate::NE, lhs_int, zero, "tobool").unwrap()
+        } else {
+             lhs_int
+        };
+
+        // 创建基本块
+        let rhs_bb = self.context.append_basic_block(parent, "logic_rhs");
+        let merge_bb = self.context.append_basic_block(parent, "logic_merge");
+
+        // 根据运算类型决定短路逻辑
+        // And: LHS true -> check RHS; LHS false -> merge (false)
+        // Or:  LHS true -> merge (true); LHS false -> check RHS
+        match op {
+            BinaryOperator::LogicalAnd => {
+                self.builder.build_conditional_branch(lhs_bool, rhs_bb, merge_bb).ok();
+            }
+            BinaryOperator::LogicalOr => {
+                self.builder.build_conditional_branch(lhs_bool, merge_bb, rhs_bb).ok();
+            }
+            _ => unreachable!(),
+        }
+        
+        // 记录 LHS 结束时的 Block (用于 PHI)
+        let lhs_end_bb = self.builder.get_insert_block().unwrap();
+
+        // --- 编译 RHS 块 ---
+        self.builder.position_at_end(rhs_bb);
+        let rhs_val = self.compile_expr(rhs)?;
+        if !rhs_val.is_int_value() { return Err("RHS must be int/bool".into()); }
+        
+        let rhs_int = rhs_val.into_int_value();
+        let rhs_bool = if rhs_int.get_type().get_bit_width() > 1 {
+             self.builder.build_int_compare(IntPredicate::NE, rhs_int, zero, "tobool").unwrap()
+        } else {
+             rhs_int
+        };
+        
+        self.builder.build_unconditional_branch(merge_bb).ok();
+        let rhs_end_bb = self.builder.get_insert_block().unwrap();
+
+        // --- 编译 Merge 块 (PHI Node) ---
+        self.builder.position_at_end(merge_bb);
+        
+        let phi = self.builder.build_phi(i1_type, "logic_res").unwrap();
+        
+        // 构建 PHI 入口
+        let true_val = i1_type.const_int(1, false);
+        let false_val = i1_type.const_int(0, false);
+
+        match op {
+            BinaryOperator::LogicalAnd => {
+                // 如果来自 LHS (说明 LHS 为 false)，结果为 false
+                // 如果来自 RHS，结果为 RHS 的值
+                phi.add_incoming(&[(&false_val, lhs_end_bb), (&rhs_bool, rhs_end_bb)]);
+            }
+            BinaryOperator::LogicalOr => {
+                // 如果来自 LHS (说明 LHS 为 true)，结果为 true
+                // 如果来自 RHS，结果为 RHS 的值
+                phi.add_incoming(&[(&true_val, lhs_end_bb), (&rhs_bool, rhs_end_bb)]);
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(phi.as_basic_value().into())
     }
 
     fn compile_float_binary(

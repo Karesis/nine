@@ -265,6 +265,42 @@ impl Analyzer {
                     self.ctx.mutabilities.insert(item.id, def.modifier);
                 }
 
+                // 处理 use 语句
+                ItemKind::Import { path, alias, .. } => {
+                    // 1. 尝试解析路径指向的目标 ID
+                    //? 乱顺序的mod和use?
+                    if let Some(target_id) = self.resolve_path(path) {
+                        
+                        // 2. 决定引入的名字
+                        let name = if let Some(alias_ident) = alias {
+                            // use foo::bar as b; -> 名字是 b
+                            alias_ident.name.clone()
+                        } else {
+                            // use foo::bar; -> 名字是 bar (路径的最后一段)
+                            path.segments.last().unwrap().name.clone()
+                        };
+
+                        // 3. 在当前作用域注册符号
+                        self.define_symbol(name, target_id, path.span);
+                        
+                        // 4. 记录引用关系 
+                        //? 是否要支持用于IDE跳转?
+                        self.ctx.path_resolutions.insert(path.id, target_id);
+                        
+                        // 5. 如果是引入类型，需要注册类型信息
+                        // 如果 target_id 是一个 Struct/Enum，把它的类型信息关联过来
+                        if let Some(ty) = self.ctx.types.get(&target_id).cloned() {
+                            // 记录 import 语句本身的类型 = 目标的类型
+                            //? TODO: @typeof()
+                            self.record_type(item.id, ty);
+                        }
+
+                    } else {
+                        // 如果此时找不到，说明顺序反了或者名字写错了
+                        self.error(format!("Cannot resolve import '{:?}'", path.segments.last().unwrap().name), path.span);
+                    }
+                }
+
                 _ => {}
             }
         }
