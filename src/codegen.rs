@@ -131,6 +131,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     fn compile_items(&mut self, items: &[Item]) {
         for item in items {
+            if let ItemKind::GlobalVariable(def) = &item.kind {
+                self.compile_global_variable(item.id, def);
+            }
+        }
+
+        for item in items {
             match &item.kind {
                 ItemKind::FunctionDecl(func) => { self.compile_function(func).ok(); }
                 ItemKind::Implementation { methods, .. } => {
@@ -1127,6 +1133,53 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             // 默认错误
             _ => Err(format!("Unsupported cast from {:?} to {:?}", src_key, target_key)),
         }
+    }
+
+    fn compile_global_variable(&mut self, id: DefId, def: &GlobalDefinition) {
+        // 1. 获取类型
+        let ty_key = self.analyzer.types.get(&id).unwrap();
+        let llvm_ty = self.compile_type(ty_key).unwrap();
+        
+        // 2. 获取修饰名
+        let name = self.analyzer.mangled_names.get(&id).cloned().unwrap_or(def.name.name.clone());
+
+        // 3. 创建全局变量
+        let global = self.module.add_global(llvm_ty, Some(AddressSpace::default()), &name);
+        
+        // 4. 设置可变性 (LLVM IR 里的 constant 意味着只读)
+        global.set_constant(def.modifier == Mutability::Constant);
+        
+        // 5. 设置初始化值
+        if let Some(init) = &def.initializer {
+            // 核心难点：compile_expr 生成的是 instructions (BasicValueEnum)，依赖 builder。
+            // 但 Global Initializer 必须是 ConstantValue。
+            // 
+            // 简单起见，我们在 MVP 阶段只支持 Literal 初始化。
+            // 如果用户写 set x = 1 + 2; 这种需要 Const Folding (常量折叠)，目前先不支持。
+            
+            if let ExpressionKind::Literal(lit) = &init.kind {
+                // 使用我们现有的 compile_literal，它返回的正是 BasicValueEnum
+                // 只要 Literal 编译出来的是 ConstInt/ConstFloat/GlobalStringPtr，就可以用。
+                
+                // 注意：compile_literal 里需要 type_key，Analyzer 已经回写到 init.id 了
+                let lit_ty = self.analyzer.types.get(&init.id).unwrap();
+                let val = self.compile_literal(lit, lit_ty).expect("Literal compile failed");
+                
+                global.set_initializer(&val);
+            } else {
+                // 如果是复杂表达式，对于 OS 来说暂不支持
+                // 未来可以实现一个 compile_const_expr
+                panic!("Global variable initializer must be a literal (for now).");
+            }
+        } else {
+            // 如果没有初始化值，设置为 Zero Initializer (.bss)
+            global.set_initializer(&llvm_ty.const_zero());
+        }
+
+        // 6. 【关键】注册到符号表
+        // 这样 compile_expr_ptr 中的 ExpressionKind::Path 就能查到它了！
+        // global.as_pointer_value() 就是这个全局变量的地址
+        self.variables.insert(id, global.as_pointer_value());
     }
 
     // 辅助：判断是否是整数类 (包括 Bool, Char, Unit)

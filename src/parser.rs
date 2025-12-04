@@ -1346,7 +1346,11 @@ impl<'a> Parser<'a> {
             TokenKind::Fn => self.parse_fn_decl(is_pub, start_span.start),
             TokenKind::Typedef => self.parse_typedef_decl(is_pub, start_span.start),
             TokenKind::Typealias => self.parse_typealias_decl(is_pub, start_span.start),
-            
+            // set/mut/const 开头
+            TokenKind::Set | TokenKind::Mut | TokenKind::Const => {
+                self.parse_global_variable(is_pub, start_span.start)
+            }
+
             // "imp" 不能带 pub (根据 EBNF)，如果这里前面解析到了 pub，是语法错误
             TokenKind::Imp => {
                 if is_pub {
@@ -1656,6 +1660,42 @@ impl<'a> Parser<'a> {
             // 3. 最后这里 move target_type
             kind: ItemKind::Implementation { target_type, methods },
             span: Span::new(start, end),
+        })
+    }
+
+    // 解析逻辑
+    fn parse_global_variable(&mut self, _is_pub: bool, start: usize) -> ParseResult<Item> {
+        // 1. Modifier
+        let modifier = if self.match_token(&[TokenKind::Mut]) { Mutability::Mutable }
+        else if self.match_token(&[TokenKind::Set]) { Mutability::Immutable }
+        else if self.match_token(&[TokenKind::Const]) { Mutability::Constant }
+        else { unreachable!() };
+
+        // 2. Name
+        let name = self.parse_identifier()?;
+
+        // 3. Type (全局变量通常强制写类型)
+        self.expect(TokenKind::Colon)?;
+        let ty = self.parse_type()?;
+
+        // 4. Initializer
+        let mut initializer = None;
+        if self.match_token(&[TokenKind::Eq]) {
+            initializer = Some(self.parse_expr()?);
+        }
+
+        let end_tok = self.expect(TokenKind::Semi)?;
+
+        Ok(Item {
+            id: self.next_id(),
+            kind: ItemKind::GlobalVariable(GlobalDefinition {
+                name,
+                ty,
+                modifier,
+                initializer,
+                span: Span::new(start, end_tok.span.end),
+            }),
+            span: Span::new(start, end_tok.span.end),
         })
     }
 

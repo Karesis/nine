@@ -219,6 +219,18 @@ impl Analyzer {
                     self.define_symbol(name.name.clone(), item.id, name.span);
                 }
 
+                ItemKind::GlobalVariable(def) => {
+                    // 1. 注册符号
+                    self.define_symbol(def.name.name.clone(), item.id, def.name.span);
+                    
+                    // 2. 注册修饰名 (Mangled Name)
+                    let mangled = self.generate_mangled_name(&def.name.name);
+                    self.ctx.mangled_names.insert(item.id, mangled);
+                    
+                    // 3. 记录可变性 (供 get_expr_mutability 使用)
+                    self.ctx.mutabilities.insert(item.id, def.modifier);
+                }
+
                 _ => {} 
             }
         }
@@ -278,7 +290,7 @@ impl Analyzer {
                         self.ctx.mangled_names.insert(m.id, mangled);
                     }
                 }
-                
+
                 ItemKind::Implementation { target_type, methods } => {
                     // 1. 计算 Key
                     let key = self.resolve_ast_type(target_type);
@@ -381,6 +393,11 @@ impl Analyzer {
                     }
                 }
                 
+                ItemKind::GlobalVariable(def) => {
+                    let ty_key = self.resolve_ast_type(&def.ty);
+                    self.record_type(item.id, ty_key);
+                }
+
                 _ => {}
             }
         }
@@ -486,6 +503,26 @@ impl Analyzer {
                 }
                 ItemKind::EnumDecl(def) => {
                     for method in &def.static_methods { self.check_function(method); }
+                }
+
+                ItemKind::GlobalVariable(def) => {
+                    let declared_ty = self.ctx.types.get(&item.id).unwrap().clone();
+                    
+                    if let Some(init) = &def.initializer {
+                        // 检查初始化表达式
+                        let init_ty = self.check_expr(init);
+                        self.check_type_match(&declared_ty, &init_ty, init.span);
+                        self.coerce_literal_type(init.id, &declared_ty, &init_ty);
+                        
+                        // TODO: 可以在这里检查 init 是否为 Compile-Time Constant
+                        // 目前我们靠 Codegen 里的处理来隐式限制
+                    } else {
+                        // OS 开发中，未初始化的全局变量通常放在 .bss 段，是合法的
+                        // 但 const/set 必须初始化
+                        if def.modifier != Mutability::Mutable {
+                            self.error("Immutable/Const globals must be initialized", def.span);
+                        }
+                    }
                 }
                 _ => {}
             }

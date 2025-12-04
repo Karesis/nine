@@ -340,6 +340,19 @@ pub enum ItemKind {
         target_type: Type,
         methods: Vec<FunctionDefinition>,
     },
+
+    // 【新增】全局变量定义
+    // covering: mut x: T = val; / set x: T = val;
+    GlobalVariable(GlobalDefinition),
+}
+
+#[derive(Debug, Clone)]
+pub struct GlobalDefinition {
+    pub name: Identifier,
+    pub ty: Type,
+    pub modifier: Mutability, // Mutable, Immutable(Set), Constant
+    pub initializer: Option<Expression>, // 全局变量通常强制要求初始化，但为了灵活性先用 Option
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
