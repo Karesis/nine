@@ -108,13 +108,18 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     .as_basic_type_enum(),
             ),
 
-            // 回退逻辑：如果 Analyzer 没能回写类型 (Type Coercion)，只能默认处理
-            // 但理想情况下 analyzer 应该已经处理为 Primitive
-            //? TODO: 更健壮的报错?
-            TypeKey::IntegerLiteral(_) => Some(self.context.i64_type().as_basic_type_enum()),
-            TypeKey::FloatLiteral(_) => Some(self.context.f64_type().as_basic_type_enum()),
+            // 这里的 Panic 是为了捕获 Analyzer 的 Bug。
+            // 所有的字面量在进入 Codegen 之前，都必须在 Analyzer 阶段被 coerce_literal_type 固化为 Primitive。
+            TypeKey::IntegerLiteral(v) => {
+                panic!("ICE (Internal Compiler Error): Analyzer failed to resolve IntegerLiteral({}) to a concrete type. This is a bug in the compiler.", v);
+            }
+            TypeKey::FloatLiteral(bits) => {
+                let v = f64::from_bits(*bits);
+                panic!("ICE (Internal Compiler Error): Analyzer failed to resolve FloatLiteral({}) to a concrete type. This is a bug in the compiler.", v);
+            }
 
-            TypeKey::Error => None,
+            // Error 类型也不应该传到 Codegen，Analyzer 应该早就拦截并返回 Err 了
+            TypeKey::Error => panic!("ICE: TypeKey::Error reached Codegen. Compilation should have failed in Analyzer phase."),
         }
     }
 
