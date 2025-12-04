@@ -170,8 +170,13 @@ impl Analyzer {
     /// Phase 1: 声明扫描
     /// ==================================================
     fn scan_declarations(&mut self, items: &[Item]) {
+        // --- Loop 1: 注册所有的定义 (Mod, Struct, Fn, Const...) ---
+        // 在这一步跳过 Import，确保所有当前层级的符号都已进入符号表
         for item in items {
             match &item.kind {
+                // 跳过 Import，留到 Loop 2 处理
+                ItemKind::Import { .. } => continue,
+
                 // --- 模块 ---
                 ItemKind::ModuleDecl {
                     name,
@@ -187,6 +192,7 @@ impl Analyzer {
                         // 压入路径栈
                         self.module_path.push(name.name.clone());
 
+                        // 递归调用
                         self.scan_declarations(subs);
 
                         // 弹出路径栈
@@ -200,18 +206,14 @@ impl Analyzer {
                 // --- 结构体 ---
                 ItemKind::StructDecl(def) => {
                     self.define_symbol(def.name.name.clone(), item.id, def.name.span);
-                    // 【新增】给结构体名注册类型，支持 Struct::new()
                     self.record_type(item.id, TypeKey::Named(item.id));
-
                     self.register_static_methods(item.id, &def.static_methods);
                 }
 
                 // --- 联合体 ---
                 ItemKind::UnionDecl(def) => {
                     self.define_symbol(def.name.name.clone(), item.id, def.name.span);
-                    // 【新增】
                     self.record_type(item.id, TypeKey::Named(item.id));
-
                     self.register_static_methods(item.id, &def.static_methods);
                 }
 
@@ -247,9 +249,9 @@ impl Analyzer {
 
                     // 如果是 extern，直接用原名；否则加模块前缀
                     let mangled = if def.is_extern {
-                        def.name.name.clone() // "printf" -> "printf"
+                        def.name.name.clone()
                     } else {
-                        self.generate_mangled_name(&def.name.name) // "add" -> "math_add"
+                        self.generate_mangled_name(&def.name.name)
                     };
 
                     self.ctx.mangled_names.insert(def.id, mangled);
@@ -264,54 +266,54 @@ impl Analyzer {
                     self.define_symbol(def.name.name.clone(), item.id, def.name.span);
 
                     // 2. 注册修饰名
-                    let mangled = self.generate_mangled_name(&def.name.name);
+                    let mangled = if def.is_extern {
+                        def.name.name.clone()
+                    } else {
+                        self.generate_mangled_name(&def.name.name)
+                    };
                     self.ctx.mangled_names.insert(item.id, mangled);
 
-                    // 3. 记录可变性 (供 get_expr_mutability 使用)
+                    // 3. 记录可变性
                     self.ctx.mutabilities.insert(item.id, def.modifier);
                 }
 
-                // 处理 use 语句
-                ItemKind::Import { path, alias, .. } => {
-                    // 1. 尝试解析路径指向的目标 ID
-                    //? 乱顺序的mod和use?
-                    if let Some(target_id) = self.resolve_path(path) {
-                        // 2. 决定引入的名字
-                        let name = if let Some(alias_ident) = alias {
-                            // use foo::bar as b; -> 名字是 b
-                            alias_ident.name.clone()
-                        } else {
-                            // use foo::bar; -> 名字是 bar (路径的最后一段)
-                            path.segments.last().unwrap().name.clone()
-                        };
-
-                        // 3. 在当前作用域注册符号
-                        self.define_symbol(name, target_id, path.span);
-
-                        // 4. 记录引用关系
-                        //? 是否要支持用于IDE跳转?
-                        self.ctx.path_resolutions.insert(path.id, target_id);
-
-                        // 5. 如果是引入类型，需要注册类型信息
-                        // 如果 target_id 是一个 Struct/Enum，把它的类型信息关联过来
-                        if let Some(ty) = self.ctx.types.get(&target_id).cloned() {
-                            // 记录 import 语句本身的类型 = 目标的类型
-                            //? TODO: @typeof()
-                            self.record_type(item.id, ty);
-                        }
-                    } else {
-                        // 如果此时找不到，说明顺序反了或者名字写错了
-                        self.error(
-                            format!(
-                                "Cannot resolve import '{:?}'",
-                                path.segments.last().unwrap().name
-                            ),
-                            path.span,
-                        );
-                    }
-                }
-
+                // 其他类型 (如 Implementation) 在 Pass 2 扫描，这里忽略
                 _ => {}
+            }
+        }
+
+        // --- Loop 2: 处理导入 (Use) ---
+        // 此时所有的 mod, struct, fn 等都已注册完毕，可以安全解析路径
+        for item in items {
+            if let ItemKind::Import { path, alias, .. } = &item.kind {
+                // 1. 尝试解析路径指向的目标 ID
+                if let Some(target_id) = self.resolve_path(path) {
+                    // 2. 决定引入的名字
+                    let name = if let Some(alias_ident) = alias {
+                        alias_ident.name.clone()
+                    } else {
+                        path.segments.last().unwrap().name.clone()
+                    };
+
+                    // 3. 在当前作用域注册符号
+                    self.define_symbol(name, target_id, path.span);
+
+                    // 4. 记录引用关系
+                    self.ctx.path_resolutions.insert(path.id, target_id);
+
+                    // 5. 如果是引入类型，需要注册类型信息
+                    if let Some(ty) = self.ctx.types.get(&target_id).cloned() {
+                        self.record_type(item.id, ty);
+                    }
+                } else {
+                    self.error(
+                        format!(
+                            "Cannot resolve import '{:?}'",
+                            path.segments.last().unwrap().name
+                        ),
+                        path.span,
+                    );
+                }
             }
         }
     }
@@ -1450,8 +1452,7 @@ impl Analyzer {
                             );
                         }
                     } else {
-                        //? 可能是全局变量或者 Module？如果没记录 mutability，默认不可变
-                        //? 或者这是一个 bug?
+                        // 没记录 mutability 的（如函数名、模块名、或解析失败的符号）一律视为不可变
                     }
                 }
             }
@@ -1490,7 +1491,10 @@ impl Analyzer {
                         // OK: *T 允许修改内容
                     }
                     _ => {
-                        //? check_expr 应该已经报错 "Not a pointer" 了
+                        // Pass.
+                        // 如果走到这里，说明 operand 不是指针。
+                        // check_expr 阶段肯定已经报过 "Cannot deref non-pointer" 错误了。
+                        // 为了避免重复报错（级联错误），这里静默跳过。
                     }
                 }
             }
