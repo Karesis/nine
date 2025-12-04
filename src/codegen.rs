@@ -17,7 +17,9 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::types::{BasicType, BasicTypeEnum, FunctionType, StructType};
-use inkwell::values::{BasicValue, BasicValueEnum, FloatValue, FunctionValue, PointerValue, IntValue};
+use inkwell::values::{
+    BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
+};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use std::collections::HashMap;
 
@@ -449,7 +451,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 else_branch,
             } => {
                 let parent = self.get_current_function();
-                
+
                 // 1. 创建基本块
                 let then_bb = self.context.append_basic_block(parent, "if_then");
                 let else_bb = self.context.append_basic_block(parent, "if_else");
@@ -457,18 +459,30 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
                 // 2. 编译条件跳转
                 let cond_val = self.compile_expr(condition)?.into_int_value();
-                
+
                 // 如果有 else 分支，跳 else_bb；否则跳 merge_bb
-                let actual_else = if else_branch.is_some() { else_bb } else { merge_bb };
-                
-                self.builder.build_conditional_branch(cond_val, then_bb, actual_else).ok();
+                let actual_else = if else_branch.is_some() {
+                    else_bb
+                } else {
+                    merge_bb
+                };
+
+                self.builder
+                    .build_conditional_branch(cond_val, then_bb, actual_else)
+                    .ok();
 
                 // 3. 编译 Then 分支
                 self.builder.position_at_end(then_bb);
                 self.compile_block(then_block)?;
                 // 检查当前 block (可能是 then_block 里的最后一个 block) 是否已经结束
                 // ompile_block 可能会产生新的 basic block，所以我们要检查 builder 当前所在的 block
-                if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                if self
+                    .builder
+                    .get_insert_block()
+                    .unwrap()
+                    .get_terminator()
+                    .is_none()
+                {
                     self.builder.build_unconditional_branch(merge_bb).ok();
                 }
 
@@ -476,9 +490,15 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 if let Some(else_stmt) = else_branch {
                     self.builder.position_at_end(else_bb);
                     self.compile_stmt(else_stmt)?;
-                    
+
                     // 检查 Else 分支编译完后，当前所在的 block 是否有终结指令
-                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                    if self
+                        .builder
+                        .get_insert_block()
+                        .unwrap()
+                        .get_terminator()
+                        .is_none()
+                    {
                         self.builder.build_unconditional_branch(merge_bb).ok();
                     }
                 }
@@ -839,20 +859,22 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             }
 
             // @sizeof
-            ExpressionKind::SizeOf(target_type) => {
-                self.compile_sizeof(target_type)
-            }
+            ExpressionKind::SizeOf(target_type) => self.compile_sizeof(target_type),
 
             // @alignof
             ExpressionKind::AlignOf(target_type) => {
                 // 1. 获取 TypeKey
-                let type_key = self.analyzer.types.get(&target_type.id)
+                let type_key = self
+                    .analyzer
+                    .types
+                    .get(&target_type.id)
                     .ok_or("AlignOf target type not resolved")?;
-                
+
                 // 2. 转为 LLVM Type
-                let llvm_ty = self.compile_type(type_key)
+                let llvm_ty = self
+                    .compile_type(type_key)
                     .ok_or("Cannot compile type for alignof")?;
-                
+
                 // 3. 生成 alignof 指令
                 Ok(llvm_ty.get_alignment().as_basic_value_enum())
             }
@@ -997,7 +1019,6 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         op: BinaryOperator,
         rhs: &Expression,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-
         // 如果是逻辑运算，进入短路求值逻辑
         if matches!(op, BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr) {
             return self.compile_short_circuit_binary(lhs, op, rhs);
@@ -1019,13 +1040,17 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         // 如果直接对指针调用 into_int_value() 会导致 Panic
         if lhs_val.is_pointer_value() {
             // 获取 LHS 的类型信息 (Analyzer 必须保证类型存在)
-            let lhs_type_key = self.analyzer.types.get(&lhs.id).ok_or("Type missing for pointer op")?;
-            
+            let lhs_type_key = self
+                .analyzer
+                .types
+                .get(&lhs.id)
+                .ok_or("Type missing for pointer op")?;
+
             return self.compile_pointer_binary(
-                lhs_val.into_pointer_value(), 
-                op, 
-                rhs_val, 
-                lhs_type_key
+                lhs_val.into_pointer_value(),
+                op,
+                rhs_val,
+                lhs_type_key,
             );
         }
 
@@ -1033,60 +1058,134 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         if lhs_val.is_int_value() && rhs_val.is_int_value() {
             let l = lhs_val.into_int_value();
             let r = rhs_val.into_int_value();
-            
+
             // 获取类型以判断符号 (Signed/Unsigned)
-            let type_key = self.analyzer.types.get(&lhs.id).ok_or("Type missing for binary op")?;
+            let type_key = self
+                .analyzer
+                .types
+                .get(&lhs.id)
+                .ok_or("Type missing for binary op")?;
             let is_signed = self.is_signed(type_key);
 
             //? TODO: 检测溢出？
             return match op {
                 BinaryOperator::Add => Ok(self.builder.build_int_add(l, r, "add").unwrap().into()),
-                BinaryOperator::Subtract => Ok(self.builder.build_int_sub(l, r, "sub").unwrap().into()),
-                BinaryOperator::Multiply => Ok(self.builder.build_int_mul(l, r, "mul").unwrap().into()),
-                
+                BinaryOperator::Subtract => {
+                    Ok(self.builder.build_int_sub(l, r, "sub").unwrap().into())
+                }
+                BinaryOperator::Multiply => {
+                    Ok(self.builder.build_int_mul(l, r, "mul").unwrap().into())
+                }
+
                 // 位运算
-                BinaryOperator::BitwiseAnd => Ok(self.builder.build_and(l, r, "and").unwrap().into()),
+                BinaryOperator::BitwiseAnd => {
+                    Ok(self.builder.build_and(l, r, "and").unwrap().into())
+                }
                 BinaryOperator::BitwiseOr => Ok(self.builder.build_or(l, r, "or").unwrap().into()),
-                BinaryOperator::BitwiseXor => Ok(self.builder.build_xor(l, r, "xor").unwrap().into()),
+                BinaryOperator::BitwiseXor => {
+                    Ok(self.builder.build_xor(l, r, "xor").unwrap().into())
+                }
 
                 // 除法 & 取模
                 BinaryOperator::Divide => {
                     if is_signed {
-                        Ok(self.builder.build_int_signed_div(l, r, "sdiv").unwrap().into())
+                        Ok(self
+                            .builder
+                            .build_int_signed_div(l, r, "sdiv")
+                            .unwrap()
+                            .into())
                     } else {
-                        Ok(self.builder.build_int_unsigned_div(l, r, "udiv").unwrap().into())
+                        Ok(self
+                            .builder
+                            .build_int_unsigned_div(l, r, "udiv")
+                            .unwrap()
+                            .into())
                     }
                 }
                 BinaryOperator::Modulo => {
                     if is_signed {
-                        Ok(self.builder.build_int_signed_rem(l, r, "srem").unwrap().into())
+                        Ok(self
+                            .builder
+                            .build_int_signed_rem(l, r, "srem")
+                            .unwrap()
+                            .into())
                     } else {
-                        Ok(self.builder.build_int_unsigned_rem(l, r, "urem").unwrap().into())
+                        Ok(self
+                            .builder
+                            .build_int_unsigned_rem(l, r, "urem")
+                            .unwrap()
+                            .into())
                     }
                 }
 
                 // 移位
-                BinaryOperator::ShiftLeft => Ok(self.builder.build_left_shift(l, r, "shl").unwrap().into()),
-                BinaryOperator::ShiftRight => Ok(self.builder.build_right_shift(l, r, is_signed, "shr").unwrap().into()),
+                BinaryOperator::ShiftLeft => {
+                    Ok(self.builder.build_left_shift(l, r, "shl").unwrap().into())
+                }
+                BinaryOperator::ShiftRight => Ok(self
+                    .builder
+                    .build_right_shift(l, r, is_signed, "shr")
+                    .unwrap()
+                    .into()),
 
                 // 比较
-                BinaryOperator::Equal => Ok(self.builder.build_int_compare(IntPredicate::EQ, l, r, "eq").unwrap().into()),
-                BinaryOperator::NotEqual => Ok(self.builder.build_int_compare(IntPredicate::NE, l, r, "ne").unwrap().into()),
+                BinaryOperator::Equal => Ok(self
+                    .builder
+                    .build_int_compare(IntPredicate::EQ, l, r, "eq")
+                    .unwrap()
+                    .into()),
+                BinaryOperator::NotEqual => Ok(self
+                    .builder
+                    .build_int_compare(IntPredicate::NE, l, r, "ne")
+                    .unwrap()
+                    .into()),
                 BinaryOperator::Less => {
-                    let pred = if is_signed { IntPredicate::SLT } else { IntPredicate::ULT };
-                    Ok(self.builder.build_int_compare(pred, l, r, "lt").unwrap().into())
+                    let pred = if is_signed {
+                        IntPredicate::SLT
+                    } else {
+                        IntPredicate::ULT
+                    };
+                    Ok(self
+                        .builder
+                        .build_int_compare(pred, l, r, "lt")
+                        .unwrap()
+                        .into())
                 }
                 BinaryOperator::LessEqual => {
-                    let pred = if is_signed { IntPredicate::SLE } else { IntPredicate::ULE };
-                    Ok(self.builder.build_int_compare(pred, l, r, "le").unwrap().into())
+                    let pred = if is_signed {
+                        IntPredicate::SLE
+                    } else {
+                        IntPredicate::ULE
+                    };
+                    Ok(self
+                        .builder
+                        .build_int_compare(pred, l, r, "le")
+                        .unwrap()
+                        .into())
                 }
                 BinaryOperator::Greater => {
-                    let pred = if is_signed { IntPredicate::SGT } else { IntPredicate::UGT };
-                    Ok(self.builder.build_int_compare(pred, l, r, "gt").unwrap().into())
+                    let pred = if is_signed {
+                        IntPredicate::SGT
+                    } else {
+                        IntPredicate::UGT
+                    };
+                    Ok(self
+                        .builder
+                        .build_int_compare(pred, l, r, "gt")
+                        .unwrap()
+                        .into())
                 }
                 BinaryOperator::GreaterEqual => {
-                    let pred = if is_signed { IntPredicate::SGE } else { IntPredicate::UGE };
-                    Ok(self.builder.build_int_compare(pred, l, r, "ge").unwrap().into())
+                    let pred = if is_signed {
+                        IntPredicate::SGE
+                    } else {
+                        IntPredicate::UGE
+                    };
+                    Ok(self
+                        .builder
+                        .build_int_compare(pred, l, r, "ge")
+                        .unwrap()
+                        .into())
                 }
 
                 _ => Err(format!("Binary op {:?} not supported for integer", op)),
@@ -1104,22 +1203,24 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let parent = self.get_current_function();
         let lhs_val = self.compile_expr(lhs)?;
-        
+
         // 确保 LHS 是 bool (i1)
         if !lhs_val.is_int_value() {
             return Err("Logical op requires boolean/integer operands".into());
         }
         let lhs_int = lhs_val.into_int_value();
-        
+
         // 如果不是 1 位宽 (i1)，需要跟 0 比较转成 i1
         let i1_type = self.context.bool_type(); // i1
         let zero = self.context.i64_type().const_zero();
-        
+
         let lhs_bool = if lhs_int.get_type().get_bit_width() > 1 {
-             // val != 0
-             self.builder.build_int_compare(IntPredicate::NE, lhs_int, zero, "tobool").unwrap()
+            // val != 0
+            self.builder
+                .build_int_compare(IntPredicate::NE, lhs_int, zero, "tobool")
+                .unwrap()
         } else {
-             lhs_int
+            lhs_int
         };
 
         // 创建基本块
@@ -1131,37 +1232,45 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         // Or:  LHS true -> merge (true); LHS false -> check RHS
         match op {
             BinaryOperator::LogicalAnd => {
-                self.builder.build_conditional_branch(lhs_bool, rhs_bb, merge_bb).ok();
+                self.builder
+                    .build_conditional_branch(lhs_bool, rhs_bb, merge_bb)
+                    .ok();
             }
             BinaryOperator::LogicalOr => {
-                self.builder.build_conditional_branch(lhs_bool, merge_bb, rhs_bb).ok();
+                self.builder
+                    .build_conditional_branch(lhs_bool, merge_bb, rhs_bb)
+                    .ok();
             }
             _ => unreachable!(),
         }
-        
+
         // 记录 LHS 结束时的 Block (用于 PHI)
         let lhs_end_bb = self.builder.get_insert_block().unwrap();
 
         // --- 编译 RHS 块 ---
         self.builder.position_at_end(rhs_bb);
         let rhs_val = self.compile_expr(rhs)?;
-        if !rhs_val.is_int_value() { return Err("RHS must be int/bool".into()); }
-        
+        if !rhs_val.is_int_value() {
+            return Err("RHS must be int/bool".into());
+        }
+
         let rhs_int = rhs_val.into_int_value();
         let rhs_bool = if rhs_int.get_type().get_bit_width() > 1 {
-             self.builder.build_int_compare(IntPredicate::NE, rhs_int, zero, "tobool").unwrap()
+            self.builder
+                .build_int_compare(IntPredicate::NE, rhs_int, zero, "tobool")
+                .unwrap()
         } else {
-             rhs_int
+            rhs_int
         };
-        
+
         self.builder.build_unconditional_branch(merge_bb).ok();
         let rhs_end_bb = self.builder.get_insert_block().unwrap();
 
         // --- 编译 Merge 块 (PHI Node) ---
         self.builder.position_at_end(merge_bb);
-        
+
         let phi = self.builder.build_phi(i1_type, "logic_res").unwrap();
-        
+
         // 构建 PHI 入口
         let true_val = i1_type.const_int(1, false);
         let false_val = i1_type.const_int(0, false);
@@ -1681,18 +1790,23 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     // 辅助函数：编译 sizeof
     fn compile_sizeof(&self, target_type: &Type) -> Result<BasicValueEnum<'ctx>, String> {
         // 1. 从 Analyzer 获取类型键
-        let type_key = self.analyzer.types.get(&target_type.id)
-            .ok_or_else(|| format!("Sizeof target type {:?} not resolved by analyzer", target_type))?;
+        let type_key = self.analyzer.types.get(&target_type.id).ok_or_else(|| {
+            format!(
+                "Sizeof target type {:?} not resolved by analyzer",
+                target_type
+            )
+        })?;
 
         // 2. 编译为 LLVM Type
-        let llvm_ty = self.compile_type(type_key)
+        let llvm_ty = self
+            .compile_type(type_key)
             .ok_or_else(|| format!("Cannot compile type {:?} for sizeof", type_key))?;
 
         // 3. 获取大小 (LLVM ConstantExpr)
         // size_of() 返回的是一个 IntValue (通常是 i64)，代表字节数
         match llvm_ty.size_of() {
             Some(size_val) => Ok(size_val.as_basic_value_enum()),
-            None => Err("Type does not have a determinable size (e.g. void)".into())
+            None => Err("Type does not have a determinable size (e.g. void)".into()),
         }
     }
 
@@ -1714,8 +1828,14 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
                 // 将指针转为整数 (i64/usize) 进行比较
                 let i64_type = self.context.i64_type();
-                let l_int = self.builder.build_ptr_to_int(l_ptr, i64_type, "lhs_p2i").unwrap();
-                let r_int = self.builder.build_ptr_to_int(r_ptr, i64_type, "rhs_p2i").unwrap();
+                let l_int = self
+                    .builder
+                    .build_ptr_to_int(l_ptr, i64_type, "lhs_p2i")
+                    .unwrap();
+                let r_int = self
+                    .builder
+                    .build_ptr_to_int(r_ptr, i64_type, "rhs_p2i")
+                    .unwrap();
 
                 let pred = match op {
                     BinaryOperator::Equal => IntPredicate::EQ,
@@ -1741,21 +1861,24 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 // 1. 获取指针指向的类型 (Pointee Type)
                 let pointee_type = match lhs_type_key {
                     TypeKey::Pointer(inner, _) => self.compile_type(inner),
-                    TypeKey::Array(inner, _) => self.compile_type(inner), 
-                    _ => return Err(format!("LHS is not a pointer/array type: {:?}", lhs_type_key)),
-                }.ok_or("Failed to compile pointee type for arithmetic")?;
+                    TypeKey::Array(inner, _) => self.compile_type(inner),
+                    _ => {
+                        return Err(format!(
+                            "LHS is not a pointer/array type: {:?}",
+                            lhs_type_key
+                        ));
+                    }
+                }
+                .ok_or("Failed to compile pointee type for arithmetic")?;
 
                 // 2. 生成 GEP (GetElementPtr)
                 // LLVM 的 GEP 强类型：ptr + N 意味着内存地址增加 N * sizeof(pointee_type)
                 let new_ptr = unsafe {
-                    self.builder.build_gep(
-                        pointee_type, 
-                        l_ptr,
-                        &[r_int],     
-                        "ptr_add"
-                    ).map_err(|_| "GEP failed")?
+                    self.builder
+                        .build_gep(pointee_type, l_ptr, &[r_int], "ptr_add")
+                        .map_err(|_| "GEP failed")?
                 };
-                
+
                 Ok(new_ptr.as_basic_value_enum())
             }
 
@@ -1765,29 +1888,35 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     // Case A: Ptr - Int => Ptr + (-Int)
                     let r_int = rhs_val.into_int_value();
                     let neg_r = self.builder.build_int_neg(r_int, "neg_offset").unwrap();
-                    
+
                     let pointee_type = match lhs_type_key {
                         TypeKey::Pointer(inner, _) => self.compile_type(inner),
                         TypeKey::Array(inner, _) => self.compile_type(inner),
                         _ => return Err("Not a pointer".into()),
-                    }.unwrap();
+                    }
+                    .unwrap();
 
                     let new_ptr = unsafe {
-                        self.builder.build_gep(pointee_type, l_ptr, &[neg_r], "ptr_sub").unwrap()
+                        self.builder
+                            .build_gep(pointee_type, l_ptr, &[neg_r], "ptr_sub")
+                            .unwrap()
                     };
                     Ok(new_ptr.as_basic_value_enum())
-
                 } else if rhs_val.is_pointer_value() {
                     // Case B: Ptr - Ptr -> Int (两个指针的距离)
                     // 返回的是元素个数 (i64)，不是字节数
                     let r_ptr = rhs_val.into_pointer_value();
-                    
+
                     let pointee_type = match lhs_type_key {
                         TypeKey::Pointer(inner, _) => self.compile_type(inner),
                         _ => return Err("Ptr diff need pointer".into()),
-                    }.unwrap();
+                    }
+                    .unwrap();
 
-                    let diff = self.builder.build_ptr_diff(pointee_type, l_ptr, r_ptr, "diff").unwrap();
+                    let diff = self
+                        .builder
+                        .build_ptr_diff(pointee_type, l_ptr, r_ptr, "diff")
+                        .unwrap();
                     Ok(diff.into())
                 } else {
                     Err("Invalid type for pointer sub".into())
@@ -1814,7 +1943,6 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
     }
 }
-
 
 trait BasicTypeEnumExt<'ctx> {
     fn get_alignment(&self) -> IntValue<'ctx>;

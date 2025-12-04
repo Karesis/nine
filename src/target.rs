@@ -1,4 +1,4 @@
-use target_lexicon::{Triple, PointerWidth};
+use target_lexicon::{PointerWidth, Triple};
 
 #[derive(Debug, Clone)]
 pub struct TargetMetrics {
@@ -16,7 +16,9 @@ impl TargetMetrics {
 
     // 从字符串解析 (e.g. "wasm32-unknown-unknown")
     pub fn from_str(s: &str) -> Result<Self, String> {
-        let triple: Triple = s.parse().map_err(|e| format!("Invalid target triple: {}", e))?;
+        let triple: Triple = s
+            .parse()
+            .map_err(|e| format!("Invalid target triple: {}", e))?;
         Ok(Self::from_triple(triple))
     }
 
@@ -35,7 +37,7 @@ impl TargetMetrics {
             ptr_align: width, // 通常指针的对齐要求等于其宽度
         }
     }
-    
+
     pub fn usize_width(&self) -> u64 {
         self.ptr_byte_width
     }

@@ -20,8 +20,8 @@ pub mod driver;
 pub mod lexer;
 pub mod parser;
 pub mod source;
-pub mod token;
 pub mod target;
+pub mod token;
 
 use crate::analyzer::Analyzer;
 use crate::codegen::CodeGen;
@@ -32,10 +32,10 @@ use inkwell::OptimizationLevel;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::targets::{
-    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
 };
 use std::error::Error;
-use std::path::{PathBuf, Path};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub enum EmitType {
@@ -140,11 +140,15 @@ fn handle_output(module: &Module, config: &CompileConfig) -> Result<(), Box<dyn 
 }
 
 // 辅助：生成 .o 文件
-fn emit_object_file(module: &Module, path: &Path, target_metrics: &TargetMetrics) -> Result<(), String> {
+fn emit_object_file(
+    module: &Module,
+    path: &Path,
+    target_metrics: &TargetMetrics,
+) -> Result<(), String> {
     Target::initialize_all(&InitializationConfig::default());
 
     // 2. 获取 Target Triple
-    let triple_str = target_metrics.triple.to_string(); 
+    let triple_str = target_metrics.triple.to_string();
     let triple = TargetTriple::create(&triple_str);
     module.set_triple(&triple);
 

@@ -13,8 +13,8 @@
 //    limitations under the License.
 
 use crate::ast::*;
-use crate::target::TargetMetrics;
 use crate::source::Span;
+use crate::target::TargetMetrics;
 use std::collections::HashMap;
 
 /// 定义 ID：指向 AST 中的节点
@@ -276,7 +276,6 @@ impl Analyzer {
                     // 1. 尝试解析路径指向的目标 ID
                     //? 乱顺序的mod和use?
                     if let Some(target_id) = self.resolve_path(path) {
-                        
                         // 2. 决定引入的名字
                         let name = if let Some(alias_ident) = alias {
                             // use foo::bar as b; -> 名字是 b
@@ -288,11 +287,11 @@ impl Analyzer {
 
                         // 3. 在当前作用域注册符号
                         self.define_symbol(name, target_id, path.span);
-                        
-                        // 4. 记录引用关系 
+
+                        // 4. 记录引用关系
                         //? 是否要支持用于IDE跳转?
                         self.ctx.path_resolutions.insert(path.id, target_id);
-                        
+
                         // 5. 如果是引入类型，需要注册类型信息
                         // 如果 target_id 是一个 Struct/Enum，把它的类型信息关联过来
                         if let Some(ty) = self.ctx.types.get(&target_id).cloned() {
@@ -300,10 +299,15 @@ impl Analyzer {
                             //? TODO: @typeof()
                             self.record_type(item.id, ty);
                         }
-
                     } else {
                         // 如果此时找不到，说明顺序反了或者名字写错了
-                        self.error(format!("Cannot resolve import '{:?}'", path.segments.last().unwrap().name), path.span);
+                        self.error(
+                            format!(
+                                "Cannot resolve import '{:?}'",
+                                path.segments.last().unwrap().name
+                            ),
+                            path.span,
+                        );
                     }
                 }
 
@@ -465,7 +469,9 @@ impl Analyzer {
                         field_order_list.push(ty);
                     }
                     self.ctx.struct_fields.insert(item.id, fields);
-                    self.ctx.struct_definitions.insert(item.id, field_order_list);
+                    self.ctx
+                        .struct_definitions
+                        .insert(item.id, field_order_list);
 
                     for method in &def.static_methods {
                         self.resolve_function_signature(method);
@@ -925,27 +931,41 @@ impl Analyzer {
 
                     // 2. 左边是字面量，右边是具体整数：右边说了算
                     // e.g. 2 * a (i32) -> 结果为 i32
-                    (TypeKey::IntegerLiteral(val), TypeKey::Primitive(p)) if self.is_integer_type(p) => {
+                    (TypeKey::IntegerLiteral(val), TypeKey::Primitive(p))
+                        if self.is_integer_type(p) =>
+                    {
                         if !self.check_int_range(*p, *val) {
-                            self.error(format!("Literal {} out of range for {:?}", val, p), expr.span);
+                            self.error(
+                                format!("Literal {} out of range for {:?}", val, p),
+                                expr.span,
+                            );
                         }
                         rhs_ty.clone()
                     }
 
                     // 3. 左边是具体整数，右边是字面量：左边说了算
                     // e.g. a (i32) * 2 -> 结果为 i32
-                    (TypeKey::Primitive(p), TypeKey::IntegerLiteral(val)) if self.is_integer_type(p) => {
+                    (TypeKey::Primitive(p), TypeKey::IntegerLiteral(val))
+                        if self.is_integer_type(p) =>
+                    {
                         if !self.check_int_range(*p, *val) {
-                            self.error(format!("Literal {} out of range for {:?}", val, p), expr.span);
+                            self.error(
+                                format!("Literal {} out of range for {:?}", val, p),
+                                expr.span,
+                            );
                         }
                         lhs_ty.clone()
                     }
 
                     // 4. 浮点数同理 (FloatLiteral vs Primitive)
-                    (TypeKey::FloatLiteral(_), TypeKey::Primitive(p)) if matches!(p, PrimitiveType::F32 | PrimitiveType::F64) => {
+                    (TypeKey::FloatLiteral(_), TypeKey::Primitive(p))
+                        if matches!(p, PrimitiveType::F32 | PrimitiveType::F64) =>
+                    {
                         rhs_ty.clone()
                     }
-                    (TypeKey::Primitive(p), TypeKey::FloatLiteral(_)) if matches!(p, PrimitiveType::F32 | PrimitiveType::F64) => {
+                    (TypeKey::Primitive(p), TypeKey::FloatLiteral(_))
+                        if matches!(p, PrimitiveType::F32 | PrimitiveType::F64) =>
+                    {
                         lhs_ty.clone()
                     }
 
@@ -956,7 +976,7 @@ impl Analyzer {
                         TypeKey::Error
                     }
                 };
-                
+
                 // 2. 双向固化：将类型信息回写到 AST
                 self.coerce_literal_type(lhs.id, &common_type, &lhs_ty);
                 self.coerce_literal_type(rhs.id, &common_type, &rhs_ty);
@@ -970,7 +990,7 @@ impl Analyzer {
                     | BinaryOperator::Greater
                     | BinaryOperator::LessEqual
                     | BinaryOperator::GreaterEqual => TypeKey::Primitive(PrimitiveType::Bool),
-                    
+
                     // 算术运算返回统一后的类型
                     _ => common_type,
                 }
@@ -1348,7 +1368,7 @@ impl Analyzer {
                 if !self.validate_cast(&src_ty, &target_ty) {
                     self.error(
                         format!("Invalid cast from {:?} to {:?}", src_ty, target_ty),
-                        expr.span
+                        expr.span,
                     );
                 }
 
@@ -1364,10 +1384,10 @@ impl Analyzer {
             ExpressionKind::SizeOf(target_type) => {
                 // 1. 解析内部类型
                 let key = self.resolve_ast_type(target_type);
-                
+
                 // 2. 将解析出的 TypeKey 记录到 Context 中
                 self.record_type(target_type.id, key);
-                
+
                 // 3. 返回类型为 u64 (usize)
                 TypeKey::Primitive(PrimitiveType::U64)
             }
@@ -1742,7 +1762,7 @@ impl Analyzer {
                 };
 
                 self.get_type_static_size(&key)
-            },
+            }
 
             ExpressionKind::Cast { expr: src_expr, .. } => {
                 let val = self.eval_constant_expr(src_expr)?;
@@ -1783,9 +1803,9 @@ impl Analyzer {
                 } else {
                     self.resolve_ast_type(target_type)
                 };
-                
+
                 self.get_type_static_align(&key)
-            },
+            }
 
             _ => None,
         }
@@ -1814,7 +1834,7 @@ impl Analyzer {
             (TypeKey::Primitive(p1), TypeKey::Primitive(p2)) => {
                 self.is_numeric_or_bool_char(p1) && self.is_numeric_or_bool_char(p2)
             }
-            
+
             // 3. 字面量 -> 基础类型 (只要是数值)
             (TypeKey::IntegerLiteral(_), TypeKey::Primitive(p)) => self.is_numeric_or_bool_char(p),
             (TypeKey::FloatLiteral(_), TypeKey::Primitive(p)) => self.is_numeric_or_bool_char(p),
@@ -1844,7 +1864,7 @@ impl Analyzer {
     }
 
     fn is_numeric_or_bool_char(&self, p: &PrimitiveType) -> bool {
-        self.is_numeric_type(p) || matches!(p, PrimitiveType::Bool) 
+        self.is_numeric_type(p) || matches!(p, PrimitiveType::Bool)
         //? TODO: 引入unicode char
     }
 
@@ -1860,8 +1880,8 @@ impl Analyzer {
                 let ptr_size = self.ctx.target.ptr_byte_width;
                 let ptr_align = self.ctx.target.ptr_align;
                 Some(Layout::new(ptr_size, ptr_align))
-            },
-            
+            }
+
             // 数组：Align 等于元素 Align，Size 等于 元素Size * N (数组整体大小必须包含 stride)
             TypeKey::Array(inner, count) => {
                 let inner_layout = self.get_type_layout(inner)?;
@@ -1880,14 +1900,14 @@ impl Analyzer {
     // 复刻 C ABI 布局算法
     fn compute_struct_layout(&self, struct_id: DefId) -> Option<Layout> {
         // 1. 获取字段列表
-        let field_types = self.ctx.struct_definitions.get(&struct_id)?; 
+        let field_types = self.ctx.struct_definitions.get(&struct_id)?;
 
         let mut current_offset = 0u64;
         let mut max_align = 1u64; // 至少为 1
 
         for field_type in field_types {
             let field_layout = self.get_type_layout(field_type)?;
-            
+
             // 1. 字段对齐：让 current_offset 对齐到 field_align
             let mask = field_layout.align - 1;
             if (current_offset & mask) != 0 {

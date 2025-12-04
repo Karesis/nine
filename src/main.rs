@@ -14,8 +14,8 @@
 
 use clap::{Parser, ValueEnum};
 use ninec::compile;
-use ninec::{CompileConfig, EmitType};
 use ninec::target::TargetMetrics;
+use ninec::{CompileConfig, EmitType};
 use std::path::PathBuf;
 use std::process::exit;
 
