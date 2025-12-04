@@ -15,6 +15,7 @@
 use clap::{Parser, ValueEnum};
 use ninec::compile;
 use ninec::{CompileConfig, EmitType};
+use ninec::target::TargetMetrics;
 use std::path::PathBuf;
 use std::process::exit;
 
@@ -36,6 +37,10 @@ struct Args {
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Target triple (e.g. x86_64-unknown-linux-gnu)
+    #[arg(long)]
+    target: Option<String>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -48,7 +53,16 @@ enum ArgEmitType {
 fn main() {
     let args = Args::parse();
 
-    // 将 CLI 参数转换为内部 Config
+    // 1. 确定 Target
+    let target_metrics = match args.target {
+        Some(s) => TargetMetrics::from_str(&s).unwrap_or_else(|e| {
+            eprintln!("Error parsing target triple: {}", e);
+            exit(1);
+        }),
+        None => TargetMetrics::host(), // 默认使用本机架构
+    };
+
+    // 2. 构造 Config
     let config = CompileConfig {
         source_path: args.input,
         output_path: args.output,
@@ -58,6 +72,7 @@ fn main() {
             ArgEmitType::Obj => EmitType::Object,
         },
         verbose: args.verbose,
+        target: target_metrics, // <--- 传入
     };
 
     // 调用编译器核心

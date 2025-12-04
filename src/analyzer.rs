@@ -13,6 +13,7 @@
 //    limitations under the License.
 
 use crate::ast::*;
+use crate::target::TargetMetrics;
 use crate::source::Span;
 use std::collections::HashMap;
 
@@ -88,11 +89,14 @@ pub struct AnalysisContext {
     pub mutabilities: HashMap<DefId, Mutability>,
     pub mangled_names: HashMap<DefId, String>,
     pub constants: HashMap<DefId, u64>,
+    // 专门用于布局计算：记录结构体字段的有序类型
+    pub struct_definitions: HashMap<DefId, Vec<TypeKey>>,
     pub errors: Vec<AnalyzeError>,
+    pub target: TargetMetrics,
 }
 
 impl AnalysisContext {
-    pub fn new() -> Self {
+    pub fn new(target: TargetMetrics) -> Self {
         Self {
             namespace_scopes: HashMap::new(),
             method_registry: HashMap::new(),
@@ -102,7 +106,9 @@ impl AnalysisContext {
             mutabilities: HashMap::new(),
             mangled_names: HashMap::new(),
             constants: HashMap::new(),
+            struct_definitions: HashMap::new(),
             errors: Vec::new(),
+            target,
         }
     }
 }
@@ -125,9 +131,9 @@ pub struct Analyzer {
 }
 
 impl Analyzer {
-    pub fn new() -> Self {
+    pub fn new(target: TargetMetrics) -> Self {
         Self {
-            ctx: AnalysisContext::new(),
+            ctx: AnalysisContext::new(target),
             scopes: Vec::new(),
             current_return_type: None,
             module_path: Vec::new(),
@@ -452,11 +458,14 @@ impl Analyzer {
 
                 ItemKind::StructDecl(def) | ItemKind::UnionDecl(def) => {
                     let mut fields = HashMap::new();
+                    let mut field_order_list = Vec::new();
                     for field in &def.fields {
                         let ty = self.resolve_ast_type(&field.ty);
-                        fields.insert(field.name.name.clone(), ty);
+                        fields.insert(field.name.name.clone(), ty.clone());
+                        field_order_list.push(ty);
                     }
                     self.ctx.struct_fields.insert(item.id, fields);
+                    self.ctx.struct_definitions.insert(item.id, field_order_list);
 
                     for method in &def.static_methods {
                         self.resolve_function_signature(method);
@@ -1335,8 +1344,13 @@ impl Analyzer {
                 // 这会触发 Path 解析，填充 path_resolutions 和 types 表
                 let src_ty = self.check_expr(src_expr);
 
-                //? TODO: 3. 检查 Cast 是否合法
-                //? e.g.,禁止 Struct 转 Int，或者做一些基础检查
+                // 验证 Cast 是否合法
+                if !self.validate_cast(&src_ty, &target_ty) {
+                    self.error(
+                        format!("Invalid cast from {:?} to {:?}", src_ty, target_ty),
+                        expr.span
+                    );
+                }
 
                 //? TODO: 4. 固化字面量(优化)
                 //? 如果是 10 as u8，我们可以顺手把 10 固化为 u8，减少 Codegen 的 cast 指令
@@ -1355,6 +1369,15 @@ impl Analyzer {
                 self.record_type(target_type.id, key);
                 
                 // 3. 返回类型为 u64 (usize)
+                TypeKey::Primitive(PrimitiveType::U64)
+            }
+
+            ExpressionKind::AlignOf(target_type) => {
+                // 1. 解析内部类型
+                let key = self.resolve_ast_type(target_type);
+                // 2. 记录类型 (供 Codegen 使用)
+                self.record_type(target_type.id, key);
+                // 3. 返回结果类型 (usize/u64)
                 TypeKey::Primitive(PrimitiveType::U64)
             }
         };
@@ -1751,8 +1774,19 @@ impl Analyzer {
                 }
             }
 
-            // 其他情况（函数调用等）不是常量
-            //? 更完善的constexpr?
+            ExpressionKind::Literal(Literal::Boolean(b)) => Some(if *b { 1 } else { 0 }),
+
+            ExpressionKind::AlignOf(target_type) => {
+                // 获取类型键 (check_expr 已经存储，但为了健壮性，若没存则重新解析)
+                let key = if let Some(k) = self.ctx.types.get(&target_type.id) {
+                    k.clone()
+                } else {
+                    self.resolve_ast_type(target_type)
+                };
+                
+                self.get_type_static_align(&key)
+            },
+
             _ => None,
         }
     }
@@ -1760,22 +1794,147 @@ impl Analyzer {
     /// 尝试在语义分析阶段计算类型大小
     /// 返回 None 表示该类型的大小依赖后端 Layout (如 Struct)，无法在 Analyzer 阶段确定
     fn get_type_static_size(&self, key: &TypeKey) -> Option<u64> {
-        match key {
-            TypeKey::Primitive(p) => Some(p.width_bytes()),
-            
-            // 指针固定 8 字节 (假设 64 位目标机器)
-            //? TODO: 支持跨平台编译，要 TargetConfig
-            TypeKey::Pointer(..) | TypeKey::Function { .. } => Some(8),
-            
-            // 数组：递归计算 inner_size * count
-            TypeKey::Array(inner, size) => {
-                let inner_size = self.get_type_static_size(inner)?;
-                Some(inner_size * size)
+        self.get_type_layout(key).map(|l| l.size)
+    }
+
+    /// 检查类型转换是否合法
+    /// 规则参考 Rust/C:
+    /// 1. 整数 <-> 整数 (包含 Bool, Char)
+    /// 2. 整数 <-> 浮点
+    /// 3. 浮点 <-> 浮点
+    /// 4. 指针 <-> 整数 (size_t)
+    /// 5. 指针 <-> 指针
+    /// 6. 数组 -> 指针 (Array Decay)
+    fn validate_cast(&self, src: &TypeKey, target: &TypeKey) -> bool {
+        match (src, target) {
+            // 1. 同类型转换：总是允许 (虽然多余)
+            (t1, t2) if t1 == t2 => true,
+
+            // 2. 基础数值类型互转 (Int, Float, Bool, Char)
+            (TypeKey::Primitive(p1), TypeKey::Primitive(p2)) => {
+                self.is_numeric_or_bool_char(p1) && self.is_numeric_or_bool_char(p2)
             }
-            //? TODO: 支持 const X = @sizeof(MyStruct);
-            TypeKey::Named(_) => None,
             
+            // 3. 字面量 -> 基础类型 (只要是数值)
+            (TypeKey::IntegerLiteral(_), TypeKey::Primitive(p)) => self.is_numeric_or_bool_char(p),
+            (TypeKey::FloatLiteral(_), TypeKey::Primitive(p)) => self.is_numeric_or_bool_char(p),
+
+            // 4. 指针 <-> 整数
+            (TypeKey::Pointer(..), TypeKey::Primitive(p)) => self.is_integer_type(p),
+            (TypeKey::Primitive(p), TypeKey::Pointer(..)) => self.is_integer_type(p),
+            // 字面量 -> 指针 (e.g. 0 as *void)
+            (TypeKey::IntegerLiteral(_), TypeKey::Pointer(..)) => true,
+
+            // 5. 指针 <-> 指针
+            (TypeKey::Pointer(..), TypeKey::Pointer(..)) => true,
+
+            // 6. 数组 -> 指针 (Decay)
+            // [i32; 10] as *i32
+            // 实际上允许数组转任意指针，不仅限于元素类型，因为这是 unsafe cast
+            (TypeKey::Array(..), TypeKey::Pointer(..)) => true,
+
+            // 其他非法
+            // e.g. Struct -> Int, Struct -> Struct
+            _ => false,
+        }
+    }
+
+    fn get_type_static_align(&self, key: &TypeKey) -> Option<u64> {
+        self.get_type_layout(key).map(|l| l.align)
+    }
+
+    fn is_numeric_or_bool_char(&self, p: &PrimitiveType) -> bool {
+        self.is_numeric_type(p) || matches!(p, PrimitiveType::Bool) 
+        //? TODO: 引入unicode char
+    }
+
+    // 计算任意类型的布局
+    fn get_type_layout(&self, key: &TypeKey) -> Option<Layout> {
+        match key {
+            TypeKey::Primitive(p) => {
+                let s = self.get_primitive_size(p);
+                Some(Layout::new(s, s)) // 基础类型：对齐 = 大小
+            }
+            // 指针固定
+            TypeKey::Pointer(..) | TypeKey::Function { .. } => {
+                let ptr_size = self.ctx.target.ptr_byte_width;
+                let ptr_align = self.ctx.target.ptr_align;
+                Some(Layout::new(ptr_size, ptr_align))
+            },
+            
+            // 数组：Align 等于元素 Align，Size 等于 元素Size * N (数组整体大小必须包含 stride)
+            TypeKey::Array(inner, count) => {
+                let inner_layout = self.get_type_layout(inner)?;
+                // 数组大小 = 元素步长(包含padding) * 数量
+                // 元素的 size 已经是经过对齐修正的了
+                Some(Layout::new(inner_layout.size * count, inner_layout.align))
+            }
+
+            // 结构体：核心逻辑
+            TypeKey::Named(def_id) => self.compute_struct_layout(*def_id),
+
             _ => None,
         }
+    }
+
+    // 复刻 C ABI 布局算法
+    fn compute_struct_layout(&self, struct_id: DefId) -> Option<Layout> {
+        // 1. 获取字段列表
+        let field_types = self.ctx.struct_definitions.get(&struct_id)?; 
+
+        let mut current_offset = 0u64;
+        let mut max_align = 1u64; // 至少为 1
+
+        for field_type in field_types {
+            let field_layout = self.get_type_layout(field_type)?;
+            
+            // 1. 字段对齐：让 current_offset 对齐到 field_align
+            let mask = field_layout.align - 1;
+            if (current_offset & mask) != 0 {
+                // 需要 padding
+                current_offset = (current_offset + mask) & !mask;
+            }
+
+            // 2. 放置字段
+            current_offset += field_layout.size;
+
+            // 3. 更新结构体最大对齐
+            if field_layout.align > max_align {
+                max_align = field_layout.align;
+            }
+        }
+
+        // 4. 末尾填充：结构体整体大小必须是 max_align 的倍数
+        let mask = max_align - 1;
+        if (current_offset & mask) != 0 {
+            current_offset = (current_offset + mask) & !mask;
+        }
+
+        Some(Layout::new(current_offset, max_align))
+    }
+
+    fn get_primitive_size(&self, p: &PrimitiveType) -> u64 {
+        use PrimitiveType::*;
+        match p {
+            I8 | U8 | Bool => 1,
+            I16 | U16 => 2,
+            I32 | U32 | F32 => 4,
+            I64 | U64 | F64 => 8,
+            // 【关键】根据 target 决定
+            ISize | USize => self.ctx.target.usize_width(),
+            Unit => 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Layout {
+    pub size: u64,
+    pub align: u64,
+}
+
+impl Layout {
+    pub fn new(size: u64, align: u64) -> Self {
+        Self { size, align }
     }
 }

@@ -21,19 +21,21 @@ pub mod lexer;
 pub mod parser;
 pub mod source;
 pub mod token;
+pub mod target;
 
 use crate::analyzer::Analyzer;
 use crate::codegen::CodeGen;
 use crate::diagnostic::emit_diagnostics;
 use crate::driver::Driver;
+use crate::target::TargetMetrics;
 use inkwell::OptimizationLevel;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::targets::{
-    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple
 };
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 
 #[derive(Debug, Clone)]
 pub enum EmitType {
@@ -48,6 +50,7 @@ pub struct CompileConfig {
     pub source_path: PathBuf,
     pub output_path: Option<PathBuf>,
     pub emit_type: EmitType,
+    pub target: TargetMetrics,
     pub verbose: bool,
 }
 
@@ -74,7 +77,7 @@ pub fn compile(config: CompileConfig) -> Result<(), Box<dyn Error>> {
     }
 
     // 2. Analyzer 阶段
-    let mut analyzer = Analyzer::new();
+    let mut analyzer = Analyzer::new(config.target.clone());
     analyzer.analyze_program(&program);
 
     if !analyzer.ctx.errors.is_empty() {
@@ -123,8 +126,7 @@ fn handle_output(module: &Module, config: &CompileConfig) -> Result<(), Box<dyn 
                 .map_err(|e| e.to_string())?;
         }
         EmitType::Object => {
-            // 将原来的 emit_object_file 逻辑移到这里或 codegen 模块中
-            emit_object_file(module, &output_path)?;
+            emit_object_file(module, &output_path, &config.target)?;
         }
         _ => {
             eprintln!(
@@ -138,15 +140,12 @@ fn handle_output(module: &Module, config: &CompileConfig) -> Result<(), Box<dyn 
 }
 
 // 辅助：生成 .o 文件
-fn emit_object_file(
-    module: &inkwell::module::Module,
-    path: &std::path::Path,
-) -> Result<(), String> {
-    // 1. 初始化 Native Target
+fn emit_object_file(module: &Module, path: &Path, target_metrics: &TargetMetrics) -> Result<(), String> {
     Target::initialize_all(&InitializationConfig::default());
 
     // 2. 获取 Target Triple
-    let triple = TargetMachine::get_default_triple();
+    let triple_str = target_metrics.triple.to_string(); 
+    let triple = TargetTriple::create(&triple_str);
     module.set_triple(&triple);
 
     // 3. 创建 Target Machine

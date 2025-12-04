@@ -134,6 +134,7 @@ define_tokens! {
 
         // 内置函数
         "sizeof" => SizeOf,
+        "alignof" => AlignOf,
     }
 
     symbols {

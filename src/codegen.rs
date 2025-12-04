@@ -17,7 +17,7 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::types::{BasicType, BasicTypeEnum, FunctionType, StructType};
-use inkwell::values::{BasicValue, BasicValueEnum, FloatValue, FunctionValue, PointerValue};
+use inkwell::values::{BasicValue, BasicValueEnum, FloatValue, FunctionValue, PointerValue, IntValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use std::collections::HashMap;
 
@@ -123,8 +123,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             PrimitiveType::I32 | PrimitiveType::U32 => self.context.i32_type().as_basic_type_enum(),
             PrimitiveType::I64 | PrimitiveType::U64 => self.context.i64_type().as_basic_type_enum(),
             PrimitiveType::ISize | PrimitiveType::USize => {
-                self.context.i64_type().as_basic_type_enum()
-            } //? TODO: 辅助函数根据目标机器选择(暂时假定 64 位)
+                // 根据 Target 的指针宽度决定生成 i32 还是 i64
+                if self.analyzer.target.ptr_byte_width == 4 {
+                    self.context.i32_type().as_basic_type_enum()
+                } else {
+                    self.context.i64_type().as_basic_type_enum()
+                }
+            }
             PrimitiveType::F32 => self.context.f32_type().as_basic_type_enum(),
             PrimitiveType::F64 => self.context.f64_type().as_basic_type_enum(),
             PrimitiveType::Bool => self.context.bool_type().as_basic_type_enum(),
@@ -833,9 +838,23 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 }
             }
 
-            // 处理 @sizeof
+            // @sizeof
             ExpressionKind::SizeOf(target_type) => {
                 self.compile_sizeof(target_type)
+            }
+
+            // @alignof
+            ExpressionKind::AlignOf(target_type) => {
+                // 1. 获取 TypeKey
+                let type_key = self.analyzer.types.get(&target_type.id)
+                    .ok_or("AlignOf target type not resolved")?;
+                
+                // 2. 转为 LLVM Type
+                let llvm_ty = self.compile_type(type_key)
+                    .ok_or("Cannot compile type for alignof")?;
+                
+                // 3. 生成 alignof 指令
+                Ok(llvm_ty.get_alignment().as_basic_value_enum())
             }
         }
     }
@@ -1792,6 +1811,25 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         match p {
             PrimitiveType::F32 | PrimitiveType::F64 => true,
             _ => false,
+        }
+    }
+}
+
+
+trait BasicTypeEnumExt<'ctx> {
+    fn get_alignment(&self) -> IntValue<'ctx>;
+}
+
+impl<'ctx> BasicTypeEnumExt<'ctx> for BasicTypeEnum<'ctx> {
+    fn get_alignment(&self) -> IntValue<'ctx> {
+        match self {
+            BasicTypeEnum::ArrayType(t) => t.get_alignment(),
+            BasicTypeEnum::FloatType(t) => t.get_alignment(),
+            BasicTypeEnum::IntType(t) => t.get_alignment(),
+            BasicTypeEnum::PointerType(t) => t.get_alignment(),
+            BasicTypeEnum::StructType(t) => t.get_alignment(),
+            BasicTypeEnum::VectorType(t) => t.get_alignment(),
+            BasicTypeEnum::ScalableVectorType(t) => t.get_alignment(),
         }
     }
 }

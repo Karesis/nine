@@ -955,25 +955,44 @@ impl<'a> Parser<'a> {
                 })
             }
 
-            // 内置函数 @sizeof(T)
+            // 内置函数
             TokenKind::At => {
                 let start = self.advance().span.start; // 吃掉 '@'
                 
-                //? TODO: @alignof(T)
-                self.expect(TokenKind::SizeOf)?;
-                self.expect(TokenKind::LParen)?;
+                // @sizeof(T)
+                if self.match_token(&[TokenKind::SizeOf]) {
+                    self.expect(TokenKind::LParen)?;
+                    let target_type = self.parse_type()?;
+                    let end = self.expect(TokenKind::RParen)?.span.end;
+                    
+                    Ok(Expression {
+                        id: self.next_id(),
+                        kind: ExpressionKind::SizeOf(target_type),
+                        span: Span::new(start, end),
+                    })
                 
-                let target_type = self.parse_type()?;
-                
-                let end = self.expect(TokenKind::RParen)?.span.end;
-                
-                Ok(Expression {
-                    id: self.next_id(),
-                    kind: ExpressionKind::SizeOf(target_type),
-                    span: Span::new(start, end),
-                })
-            }
+                // @alignof(T)
+                } else if self.match_token(&[TokenKind::AlignOf]) {
+                    self.expect(TokenKind::LParen)?;
+                    let target_type = self.parse_type()?;
+                    let end = self.expect(TokenKind::RParen)?.span.end;
+                    
+                    Ok(Expression {
+                        id: self.next_id(),
+                        kind: ExpressionKind::AlignOf(target_type),
+                        span: Span::new(start, end),
+                    })
 
+                } else {
+                    // 既不是 sizeof 也不是 alignof
+                    return Err(ParseError {
+                        expected: "sizeof or alignof".into(),
+                        found: self.peek().kind,
+                        span: self.peek().span,
+                        message: "Expected 'sizeof' or 'alignof' after '@'".into(),
+                    });
+                }
+            }
             _ => Err(ParseError {
                 expected: "Expression".into(),
                 found: token.kind,

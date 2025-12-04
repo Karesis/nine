@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 clap = { version = "*", features = ["derive"] }
 inkwell = { version = "*", features = ["llvm20-1"] }
+target-lexicon = "0.13.3"

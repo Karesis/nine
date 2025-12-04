@@ -137,22 +137,6 @@ pub enum PrimitiveType {
     Unit,
 }
 
-impl PrimitiveType {
-    pub fn width_bytes(&self) -> u64 {
-        use PrimitiveType::*;
-        match self {
-            I8 | U8 | Bool => 1,
-            I16 | U16 => 2,
-            I32 | U32 | F32 => 4,
-            I64 | U64 | F64 => 8,
-            // 假设 64 位系统
-            //? TODO: 支持配置
-            ISize | USize => 8, 
-            Unit => 0,
-        }
-    }
-}
-
 /// ======================================================
 /// 表达式
 /// ======================================================
@@ -236,6 +220,7 @@ pub enum ExpressionKind {
 
     // 内置函数 @sizeof(T)
     SizeOf(Type),
+    AlignOf(Type),
 }
 
 #[derive(Debug, Clone)]
