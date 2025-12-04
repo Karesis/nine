@@ -29,23 +29,23 @@ impl<'a> TokenStream<'a> {
         Self {
             lexer,
             buffer: VecDeque::new(),
-            // 初始 span，可以是 0..0
+            // 初始 span
             last_span: Span::new(0, 0), 
             base_offset
         }
     }
 
-    /// 核心：确保缓冲区里至少有 n+1 个 Token (用于 peek(n))
+    /// 确保缓冲区里至少有 n+1 个 Token (用于 peek(n))
     fn fill(&mut self, n: usize) {
         while self.buffer.len() <= n {
             let mut tok = self.lexer.next_token();
             
-            // 【在这里统一修正】入队前就改好
+            // 入队前做好span map
             if tok.kind != TokenKind::EOF {
                 tok.span.start += self.base_offset;
                 tok.span.end += self.base_offset;
             } else {
-                // EOF 位置通常是 local len，也加上 base
+                // EOF 位置是 local len，也加上 base
                 tok.span.start += self.base_offset;
                 tok.span.end += self.base_offset;
             }
@@ -59,7 +59,6 @@ impl<'a> TokenStream<'a> {
     fn peek(&mut self, n: usize) -> Token {
         self.fill(n);
         // 如果 n 越界（说明已经全是 EOF 了），返回 buffer 里的最后一个（必定是 EOF）
-        //？问题同上，没有放进去会导致这里不是eof？
         *self.buffer.get(n).unwrap_or_else(|| self.buffer.back().unwrap())
     }
 
@@ -75,7 +74,7 @@ impl<'a> TokenStream<'a> {
 }
 
 // ==========================================
-// Parser (High Level Logic)
+// Parser 主体
 // ==========================================
 
 pub struct Parser<'a> {
@@ -119,7 +118,7 @@ impl<'a> Parser<'a> {
 
     fn advance(&mut self) -> Token {
         let tok = self.stream.advance();
-        self.previous_kind = tok.kind; // <--- 关键点
+        self.previous_kind = tok.kind;
         tok
     }
     
@@ -166,7 +165,7 @@ impl<'a> Parser<'a> {
     }
     
     pub fn synchronize(&mut self) {
-        // 1. 必须先吃掉那个导致报错的“坏”Token，打破死循环
+        // 必须先吃掉那个导致报错的“坏”Token，打破死循环
         self.advance();
 
         while !self.is_at_end() {
@@ -187,7 +186,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Imp | 
                 TokenKind::Typedef | 
                 TokenKind::Typealias |
-                TokenKind::Pub | // pub 也是一个强烈的声明开始信号
+                TokenKind::Pub | 
 
                 // --- 变量声明 (DeclStmt) ---
                 TokenKind::Set | 
@@ -215,12 +214,12 @@ impl<'a> Parser<'a> {
 
     /// 获取 Token 对应的源码文本
     pub fn text(&self, token: Token) -> &'a str {
-        // 修正：Token 的 span 是全局偏移量 (包含 base_offset)
+        // Token 的 span 是全局偏移量 (包含 base_offset)
         // self.source 是当前文件的局部源码 (从 0 开始)
         // 所以必须减去 base_offset 才能正确切片
         let offset = self.stream.base_offset;
         
-        // 安全检查（可选，但推荐用于调试）
+        // 安全检查
         if token.span.start < offset {
             panic!("Token start {} is smaller than base offset {}", token.span.start, offset);
         }
@@ -231,14 +230,14 @@ impl<'a> Parser<'a> {
         &self.source[local_start..local_end]
     }
 
-    /// 核心辅助函数：分配下一个 ID
+    /// 辅助函数：分配下一个 ID
     fn next_id(&mut self) -> NodeId {
         let id = *self.node_id_counter;
         *self.node_id_counter += 1;
         NodeId(id)
     }
 
-    // 辅助：处理字符串转义
+    // 辅助函数：处理字符串转义
     fn unescape_string(&self, raw: &str) -> String {
         let mut result = String::new();
         let mut chars = raw.chars();
@@ -252,9 +251,8 @@ impl<'a> Parser<'a> {
                     Some('\\') => result.push('\\'),
                     Some('"') => result.push('"'),
                     Some('0') => result.push('\0'),
-                    // 可以根据需要支持更多，如 \xHH hex
                     Some(other) => {
-                        // 未知转义，保留原样或报错
+                        // 未知转义，保留原样
                         result.push('\\');
                         result.push(other);
                     }
@@ -279,7 +277,6 @@ impl<'a> Parser<'a> {
 impl<'a> Parser<'a> {
     /// EBNF: Type -> PointerType | ArrayOrAtom
     pub fn parse_type(&mut self) -> ParseResult<Type> {
-        // 利用向前看 (Lookahead) 来决定分支
         // PointerType 以 '*' 或 '^' 开头
         if self.check(TokenKind::Star) || self.check(TokenKind::Caret) {
             return self.parse_pointer_type();
@@ -316,7 +313,7 @@ impl<'a> Parser<'a> {
 
     /// EBNF: ArrayOrAtom -> AtomType { "[" INT "]" }
     fn parse_array_or_atom(&mut self) -> ParseResult<Type> {
-        // 1. 先解析基础原子类型
+        // 1. 解析基础原子类型
         let mut ty = self.parse_atom_type()?;
 
         // 2. 循环处理后缀：只要后面是 '['，就说明是数组
@@ -325,8 +322,7 @@ impl<'a> Parser<'a> {
             let size_token = self.expect(TokenKind::Integer)?;
             
             // 解析数组大小
-            // 这里我们暂时只支持字面量 INT。
-            // 如果你的语言支持编译时常量表达式 (const generics)，这里应该改为 parse_expression
+            // TODO: const expr
             let size_str = self.text(size_token);
             let size = size_str.parse::<u64>().map_err(|_| ParseError {
                 expected: "Integer that fits in u64".into(),
@@ -338,7 +334,7 @@ impl<'a> Parser<'a> {
             let end_token = self.expect(TokenKind::RBracket)?;
             
             // 构造新的 ArrayType，包裹住之前的 type
-            // 例如 i32[10] -> Array(inner: i32, size: 10)
+            // i32[10] -> Array(inner: i32, size: 10)
             let new_span = Span::new(ty.span.start, end_token.span.end);
             ty = Type {
                 id: self.next_id(),
@@ -394,7 +390,7 @@ impl<'a> Parser<'a> {
                 let end_token = self.expect(TokenKind::RParen)?;
                 Ok(Type {
                     id: self.next_id(),
-                    kind: inner.kind, // 括号只是改变解析优先级，不改变 AST 结构（除非你想保留 ParenType）
+                    kind: inner.kind, // 括号只是改变解析优先级，不改变 AST 结构
                     span: Span::new(span.start, end_token.span.end),
                 })
             }
@@ -449,7 +445,7 @@ impl<'a> Parser<'a> {
 
     // === 辅助函数 ===
 
-    /// 简单的 Path 解析：Ident { :: Ident }
+    /// Path 解析：Ident { :: Ident }
     pub fn parse_path(&mut self) -> ParseResult<Path> {
         let mut segments = Vec::new();
         let start_pos = self.peek().span.start;
@@ -494,7 +490,6 @@ impl<'a> Parser<'a> {
             TokenKind::F32 => PrimitiveType::F32,
             TokenKind::F64 => PrimitiveType::F64,
             TokenKind::Bool => PrimitiveType::Bool,
-            // 理论上这里不会 panic，因为调用前 match 已经过滤了
             _ => unreachable!("Not a primitive token"),
         }
     }
@@ -502,7 +497,7 @@ impl<'a> Parser<'a> {
 
 impl<'a> Parser<'a> {
     // ==========================================
-    // 表达式解析 (从低优先级到高优先级)
+    // 表达式解析 
     // ==========================================
 
     /// 入口：Expression -> LogicOr
@@ -592,7 +587,7 @@ impl<'a> Parser<'a> {
         Ok(lhs)
     }
 
-    // New Level: Shift -> Additive { ("<"|"<="|">"|">=") Additive }
+    // Level 5: Shift -> Additive { ("<"|"<="|">"|">=") Additive }
     fn parse_shift(&mut self) -> ParseResult<Expression> {
         let mut lhs = self.parse_additive()?;
 
@@ -613,11 +608,10 @@ impl<'a> Parser<'a> {
         Ok(lhs)
     }
 
-    /// Level 5: Additive -> Multiplicative { ("+"| "-" | "bor" | "xor") Multiplicative }
+    /// Level 6: Additive -> Multiplicative { ("+"| "-" | "bor" | "xor") Multiplicative }
     fn parse_additive(&mut self) -> ParseResult<Expression> {
         let mut lhs = self.parse_multiplicative()?;
 
-        // 注意：bor 和 xor 是关键字 Token，不是符号
         while self.match_token(&[TokenKind::Plus, TokenKind::Minus, TokenKind::BitOr, TokenKind::Xor]) {
             let op = match self.previous_kind {
                 TokenKind::Plus => BinaryOperator::Add,
@@ -638,7 +632,7 @@ impl<'a> Parser<'a> {
         Ok(lhs)
     }
 
-    /// Level 6: Multiplicative -> Unary { ("*" | "/" | "%" | "band") Unary }
+    /// Level 7: Multiplicative -> Unary { ("*" | "/" | "%" | "band") Unary }
     fn parse_multiplicative(&mut self) -> ParseResult<Expression> {
         let mut lhs = self.parse_unary()?;
 
@@ -662,7 +656,7 @@ impl<'a> Parser<'a> {
         Ok(lhs)
     }
 
-    /// Level 7: Unary -> ("-" | "!") Unary | Postfix
+    /// Level 8: Unary -> ("-" | "!") Unary | Postfix
     fn parse_unary(&mut self) -> ParseResult<Expression> {
         // 检查前缀运算符
         if self.match_token(&[TokenKind::Minus, TokenKind::Bang]) {
@@ -688,15 +682,14 @@ impl<'a> Parser<'a> {
         self.parse_postfix()
     }
 
-    /// Level 8: Postfix -> Primary { ... }
-    /// 这是最复杂的部分，处理调用、索引、字段访问、Cast、后缀解引用
+    /// Level 9: Postfix -> Primary { ... }
     fn parse_postfix(&mut self) -> ParseResult<Expression> {
         let mut expr = self.parse_primary()?;
 
         loop {
             if self.match_token(&[TokenKind::LParen]) {
                 // 1. 函数调用: expr(args)
-                let args = self.parse_arguments()?; // 辅助函数
+                let args = self.parse_arguments()?; 
                 let end_token = self.expect(TokenKind::RParen)?;
                 let span = Span::new(expr.span.start, end_token.span.end);
                 
@@ -724,8 +717,6 @@ impl<'a> Parser<'a> {
                 let ident = Identifier { name: self.text(name).to_string(), span: name.span };
                 
                 // 检查是否是方法调用: expr.method(...)
-                // EBNF: Postfix -> "." Identifier. 但 AST 里区分了 MethodCall 和 FieldAccess
-                // 我们可以 Lookahead 看下一个是不是 '('
                 if self.check(TokenKind::LParen) {
                     self.advance(); // 吃掉 '('
                     let args = self.parse_arguments()?;
@@ -824,18 +815,16 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let expr = self.parse_expr()?;
                 self.expect(TokenKind::RParen)?;
-                // Span 应该包含括号吗？通常是的
-                Ok(expr) // 这里返回内部 expr，也可以包裹一个 ParenExpr 节点
+                Ok(expr) //? 包裹一个 ParenExpr 节点
             }
 
             // 路径 OR 结构体初始化
-            // 两者都以 Identifier 开头：
             // Path:   std::io::File
             // Struct: std::io::File { fd: 1 }
             TokenKind::Identifier => {
-                let path = self.parse_path()?; // 先解析完整的 Path
+                let path = self.parse_path()?; 
                 
-                // 歧义解决：如果后面跟着 '{'，则是结构体初始化
+                // 如果后面跟着 '{'，则是结构体初始化
                 if self.check(TokenKind::LBrace) {
                     self.parse_struct_literal(path)
                 } else {
@@ -970,13 +959,12 @@ impl<'a> Parser<'a> {
                 // 1. 去掉首尾的单引号 '...'
                 let content = &text[1..text.len()-1];
                 
-                // 2. 直接调用刚才写的字符串反转义函数！
-                // 它能完美处理 \n, \t, \\ 等所有情况
-                // 比如输入文本是 `\n` (两个字符)，它会返回包含一个换行符的 String
+                // 2. 调用字符串反转义函数
                 let unescaped_str = self.unescape_string(content);
                 
                 // 3. 取出第一个字符
-                // 如果是空字符 '' (虽然lexer应该拦截了)，给个 \0
+                // 如果是空字符 '' 给个 \0
+                //? 按理来说拦截了？
                 let c = unescaped_str.chars().next().unwrap_or('\0');
                 
                 Ok(Literal::Char(c))
@@ -988,7 +976,7 @@ impl<'a> Parser<'a> {
 
 impl<'a> Parser<'a> {
     // ==========================================
-    // 语句解析 (Statement Parsing)
+    // 语句解析 
     // ==========================================
 
     /// Statement -> Decl | Assign | Call | If | While | Break | Continue | Ret | Block | Switch
@@ -1003,13 +991,11 @@ impl<'a> Parser<'a> {
         if self.check(TokenKind::LBrace) {
             // parse_block 内部已经处理了 { } 的消耗和 Span 的计算
             let block = self.parse_block()?;
-            
-            // 直接取出 block.span
             let span = block.span; 
             
             return Ok(Statement {
                 id: self.next_id(),
-                kind: StatementKind::Block(block), // 这里的 kind 变成了 Block(Block)
+                kind: StatementKind::Block(block), 
                 span,
             });
         }
@@ -1041,7 +1027,6 @@ impl<'a> Parser<'a> {
         }
 
         // 4. 剩下的歧义：AssignStmt vs CallStmt
-        // 两者都以 Postfix 开头：
         // Assign: Postfix "=" Expr ";"
         // Call:   Postfix ";"
         self.parse_assign_or_call_stmt()
@@ -1049,7 +1034,7 @@ impl<'a> Parser<'a> {
 
     /// Block -> "{" { Statement } "}"
     /// 返回 Vec<Statement> 供其他结构（如函数体）复用
-    fn parse_block(&mut self) -> ParseResult<Block> { // 返回类型变了
+    fn parse_block(&mut self) -> ParseResult<Block> { 
         let start = self.expect(TokenKind::LBrace)?.span.start;
         
         let mut stmts = Vec::new();
@@ -1121,8 +1106,6 @@ impl<'a> Parser<'a> {
         let condition = self.parse_expr()?;
         self.expect(TokenKind::RParen)?;
 
-        // === 修正点 1：直接获取 Block 结构 ===
-        // parse_block 返回 ParseResult<Block>
         let then_block = self.parse_block()?; 
 
         let mut else_branch = None;
@@ -1131,9 +1114,6 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume 'if'
                 else_branch = Some(Box::new(self.parse_if_stmt()?));
             } else {
-                // else { ... }
-                // === 修正点 2：else 后面如果是块，也需要包成 Statement ===
-                // 因为 AST 里 else_branch 是 Option<Box<Statement>>
                 let block = self.parse_block()?;
                 let span = block.span;
                 else_branch = Some(Box::new(Statement {
@@ -1151,7 +1131,7 @@ impl<'a> Parser<'a> {
             id: self.next_id(),
             kind: StatementKind::If {
                 condition,
-                then_block, // 类型匹配：Block
+                then_block, 
                 else_branch,
             },
             span: Span::new(start, end),
@@ -1169,8 +1149,6 @@ impl<'a> Parser<'a> {
         // Optional Loop Variable: [ ":" DeclStmt ]
         let mut init_statement = None;
         if self.match_token(&[TokenKind::Colon]) {
-            // EBNF: DeclStmt -> VarModifier ...
-            // 我们需要 check 下一个是不是 VarModifier
             if self.match_token(&[TokenKind::Set, TokenKind::Mut, TokenKind::Const]) {
                 let modifier = self.previous_kind;
                 init_statement = Some(Box::new(self.parse_decl_stmt(modifier)?));
@@ -1247,7 +1225,6 @@ impl<'a> Parser<'a> {
                 // 解析语句 (可能是 Block，也可能是单行)
                 let stmt = self.parse_statement()?;
                 
-                // === 关键修正：归一化为 Block 结构 ===
                 let block = self.statement_to_block(stmt);
                 default_case = Some(block);
 
@@ -1255,7 +1232,7 @@ impl<'a> Parser<'a> {
                 // 普通 Case
                 let mut patterns = Vec::new();
                 let first = self.parse_expr()?;
-                patterns.push(first.clone()); // 这里的 clone 视 Expression 实现而定，或者用 span 记录起点
+                patterns.push(first.clone()); 
                 let pattern_start = first.span.start;
 
                 while self.match_token(&[TokenKind::Pipe]) {
@@ -1264,8 +1241,6 @@ impl<'a> Parser<'a> {
                 
                 self.expect(TokenKind::Arrow)?;
                 let stmt = self.parse_statement()?;
-
-                // === 关键修正：归一化为 Block 结构 ===
                 let block = self.statement_to_block(stmt);
                 
                 // Case 的 Span 包含 patterns + body
@@ -1273,7 +1248,7 @@ impl<'a> Parser<'a> {
                 
                 cases.push(SwitchCase {
                     patterns,
-                    body: block, // 现在是 Block 类型
+                    body: block,
                     span,
                 });
             }
@@ -1288,15 +1263,15 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // === 辅助工具：将任意 Statement 转换为 Block ===
+    // 辅助函数：将任意 Statement 转换为 Block
     // 如果它本来就是 Block，直接拆包取出；
     // 如果它是单行语句，包装成 Block。
     fn statement_to_block(&mut self, stmt: Statement) -> Block {
         match stmt.kind {
-            // 如果本身就是 Block (即用户写了 { ... })，直接用里面的 Block 结构
+            // 如果本身就是 Block (即写了 { ... })，直接用里面的 Block 结构
             StatementKind::Block(b) => b,
             
-            // 否则 (用户写了 -> ret 0;)，人工构造成 Block
+            // 否则 (-> ret 0;)，人工构造成 Block
             _ => Block {
                 id: self.next_id(),
                 span: stmt.span, // Block 的范围就是这单行语句的范围
@@ -1310,11 +1285,8 @@ impl<'a> Parser<'a> {
     fn parse_assign_or_call_stmt(&mut self) -> ParseResult<Statement> {
         let start = self.peek().span.start;
         
-        // 1. 严格按照 EBNF: Postfix
-        // 注意：parse_postfix 只解析到 Primary + Suffixes。
-        // 它不会解析 1+1 (Binary)。
-        // 这符合 EBNF：AssignStmt -> Postfix "=" Expr ";"
-        // 这意味着 `a + b = 1;` 在语法层面就会报错，这很好。
+        // 严格解析Postfix
+        // `a + b = 1;` 在语法层面就会报错
         let expr = self.parse_postfix()?;
         
         // 2. 分歧判断
@@ -1332,10 +1304,8 @@ impl<'a> Parser<'a> {
             // 是调用/表达式语句: Postfix ";"
             let end_tok = self.expect(TokenKind::Semi)?;
             
-            // 语义检查预告：
-            // 虽然语法允许 `1;` 或 `a.b;`，但通常我们只允许 Call 类型的表达式作为语句。
-            // 这可以在 Analyzer 阶段检查：
             // "Error: Statement must be an assignment or a function call."
+            //? analyzer 检查了?
             
             Ok(Statement {
                 id: self.next_id(),
@@ -1348,7 +1318,7 @@ impl<'a> Parser<'a> {
 
 impl<'a> Parser<'a> {
     // ==========================================
-    // 顶层定义解析 (Top Level Parsing)
+    // 顶层定义解析 
     // ==========================================
 
     /// Program -> { TopLevelDecl }
@@ -1369,7 +1339,6 @@ impl<'a> Parser<'a> {
     /// TopLevelDecl 分发逻辑
     fn parse_top_level(&mut self) -> ParseResult<Item> {
         // 1. 处理 Visibility (pub)
-        // 注意：imp 不带 pub，其他大多可以带
         let is_pub = self.match_token(&[TokenKind::Pub]);
         let start_span = if is_pub { self.previous_span() } else { self.peek().span };
 
@@ -1389,7 +1358,7 @@ impl<'a> Parser<'a> {
                 self.parse_global_variable(is_pub, start_span.start)
             }
 
-            // "imp" 不能带 pub (根据 EBNF)，如果这里前面解析到了 pub，是语法错误
+            // "imp" 不能带 pub
             TokenKind::Imp => {
                 if is_pub {
                     return Err(ParseError {
@@ -1484,7 +1453,7 @@ impl<'a> Parser<'a> {
     }
 
     // ==========================================
-    // 结构体/联合体解析 (Refactored)
+    // 结构体/联合体解析 
     // ==========================================
 
     // StructDecl -> "struct" [ "(" INT ")" ] Identifier "{" ... "}"
@@ -1501,7 +1470,6 @@ impl<'a> Parser<'a> {
     }
 
     // UnionDecl -> "union" [ "(" INT ")" ] Identifier "{" ... "}"
-    // 现在 Union 也完全支持对齐语法了！
     fn parse_union_decl(&mut self, _is_pub: bool, start: usize) -> ParseResult<Item> {
         // 调用通用解析逻辑，传入 Union 关键字
         let def = self.parse_record_definition(TokenKind::Union, start)?;
@@ -1533,8 +1501,7 @@ impl<'a> Parser<'a> {
         let mut static_methods = Vec::new();
 
         while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-            // 1. 先检查是不是静态方法 (fn 或 pub fn)
-            // 逻辑完全复用：Struct/Union/Enum 里的静态方法长得都一样
+            // 1. 检查是不是静态方法 (fn 或 pub fn)
             let is_fn = self.check(TokenKind::Fn) || 
                         (self.check(TokenKind::Pub) && self.check_nth(1, TokenKind::Fn));
 
@@ -1545,7 +1512,7 @@ impl<'a> Parser<'a> {
                 static_methods.push(self.parse_function_definition(is_method_pub, fn_start, None)?);
             } else {
                 // 2. 如果不是方法，那就是数据成员 (Field 或 Variant)
-                // 调用传入的闭包来解析它
+                // 调用传入的闭包来解析
                 items.push(parse_item(self)?);
             }
         }
@@ -1554,7 +1521,7 @@ impl<'a> Parser<'a> {
         Ok((items, static_methods, Span::new(start, end)))
     }
 
-    // === 核心公共逻辑：解析类似 Struct 的定义 ===
+    // 公共逻辑：解析类似 Struct 的定义 
     // 负责解析: Keyword [Alignment] Identifier "{" { Members } "}"
     // 负责解析: Keyword [Alignment] Identifier "{" ... "}"
     fn parse_record_definition(&mut self, keyword: TokenKind, start: usize) -> ParseResult<StructDefinition> {
@@ -1588,8 +1555,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // === 辅助：解析可选对齐 ===
-    // 格式: [ "(" INT ")" ]
+    // 辅助函数：解析可选对齐 
+    // [ "(" INT ")" ]
     fn parse_optional_alignment(&mut self) -> ParseResult<Option<u32>> {
         if self.match_token(&[TokenKind::LParen]) {
             let int_tok = self.expect(TokenKind::Integer)?;
@@ -1609,7 +1576,7 @@ impl<'a> Parser<'a> {
                 });
             }
             
-            // 额外检查：是否是 2 的幂 (位运算技巧: x & (x-1) == 0 表示只有一位是1)
+            // 额外检查：是否是 2 的幂 (x & (x-1) == 0 表示只有一位是1)
             if (val & (val - 1)) != 0 {
                  return Err(ParseError {
                     expected: "Power of 2".into(), found: TokenKind::Integer, span: int_tok.span,
@@ -1712,7 +1679,7 @@ impl<'a> Parser<'a> {
         // 2. Name
         let name = self.parse_identifier()?;
 
-        // 3. Type (全局变量通常强制写类型)
+        // 3. Type (全局变量强制写类型)
         self.expect(TokenKind::Colon)?;
         let ty = self.parse_type()?;
 
@@ -1738,7 +1705,7 @@ impl<'a> Parser<'a> {
     }
 
     // ==========================================
-    // 函数解析核心 (复用)
+    // 函数解析核心 
     // ==========================================
 
     /// 解析函数定义
@@ -1787,8 +1754,8 @@ impl<'a> Parser<'a> {
             name,
             params,
             return_type,
-            body,          // Option<Block>
-            is_variadic,   // bool (记得在 AST 结构体里加上这个字段!)
+            body,          
+            is_variadic,   
             is_pub,
             span: Span::new(start, end_pos),
         })
@@ -1814,12 +1781,11 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            // 2. 检查 self (保持原有逻辑)
+            // 2. 检查 self 
             let is_self_start = self.check(TokenKind::SelfVal) || 
                                 ((self.check(TokenKind::Mut) || self.check(TokenKind::Const)) && self.check_nth(1, TokenKind::SelfVal));
 
             if is_self_start {
-                // ... (原有 self 解析逻辑保持不变) ...
                 let target_type = if let Some(ty) = ctx_type { ty } else {
                     return Err(ParseError { expected: "Parameter".into(), found: TokenKind::SelfVal, span: self.peek().span, message: "self only allowed in imp".into() });
                 };
@@ -1843,7 +1809,7 @@ impl<'a> Parser<'a> {
                 });
 
             } else {
-                // 3. 普通参数解析 (保持原有逻辑)
+                // 3. 普通参数解析 
                 let mut modifier = Mutability::Immutable;
                  if self.match_token(&[TokenKind::Mut]) { modifier = Mutability::Mutable; }
                 else if self.match_token(&[TokenKind::Const]) { modifier = Mutability::Constant; }
@@ -1870,7 +1836,7 @@ impl<'a> Parser<'a> {
         Ok((params, is_variadic))
     }
     
-    // 辅助: parse_identifier (之前可能还没写，这里补上)
+    // 辅助函数: parse_identifier 
     fn parse_identifier(&mut self) -> ParseResult<Identifier> {
         let tok = self.expect(TokenKind::Identifier)?;
         Ok(Identifier {

@@ -1,7 +1,7 @@
 use crate::source::Span;
 
 /// ======================================================
-/// 0. 基础定义
+/// 基础定义
 /// ======================================================
 
 /// 带有位置信息的标识符
@@ -51,7 +51,7 @@ pub enum UnaryOperator {
 }
 
 /// ======================================================
-/// 1. 类型系统
+/// 类型系统
 /// ======================================================
 
 #[derive(Debug, Clone)]
@@ -100,7 +100,7 @@ pub enum PrimitiveType {
 }
 
 /// ======================================================
-/// 2. 表达式
+/// 表达式
 /// ======================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -198,7 +198,7 @@ pub enum Literal {
 }
 
 /// ======================================================
-/// 3. 语句
+/// 语句
 /// ======================================================
 
 #[derive(Debug, Clone)]
@@ -276,7 +276,7 @@ pub struct Block {
 }
 
 /// ======================================================
-/// 4. 顶层定义
+/// 顶层定义
 /// ======================================================
 
 #[derive(Debug, Clone)]
@@ -299,7 +299,7 @@ pub enum ItemKind {
     ModuleDecl {
         name: Identifier,
         is_pub: bool,
-        items: Option<Vec<Item>>, // <--- 新增这个字段
+        items: Option<Vec<Item>>,
     },
     
     /// 导入: use path as alias;
@@ -341,7 +341,7 @@ pub enum ItemKind {
         methods: Vec<FunctionDefinition>,
     },
 
-    // 【新增】全局变量定义
+    // 全局变量定义
     // covering: mut x: T = val; / set x: T = val;
     GlobalVariable(GlobalDefinition),
 }
@@ -351,7 +351,7 @@ pub struct GlobalDefinition {
     pub name: Identifier,
     pub ty: Type,
     pub modifier: Mutability, // Mutable, Immutable(Set), Constant
-    pub initializer: Option<Expression>, // 全局变量通常强制要求初始化，但为了灵活性先用 Option
+    pub initializer: Option<Expression>, 
     pub span: Span,
 }
 
@@ -399,7 +399,7 @@ pub struct EnumVariant {
     pub id: NodeId,
     pub name: Identifier,
     /// 显式赋值 (= INT)
-    pub value: Option<Expression>, // 建议存 Expression 而不是 i64，支持常量表达式 (1 << 2)
+    pub value: Option<Expression>, 
     pub span: Span,
 }
 

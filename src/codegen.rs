@@ -3,7 +3,7 @@ use inkwell::context::Context;
 use inkwell::builder::Builder;
 use inkwell::module::{Module, Linkage};
 use inkwell::types::{BasicType, BasicTypeEnum, StructType, FunctionType};
-use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue, IntValue, FloatValue, ValueKind};
+use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue, FloatValue};
 use inkwell::{AddressSpace, IntPredicate, FloatPredicate};
 use inkwell::basic_block::BasicBlock;
 
@@ -89,6 +89,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
             // 回退逻辑：如果 Analyzer 没能回写类型 (Type Coercion)，只能默认处理
             // 但理想情况下 analyzer 应该已经处理为 Primitive
+            //? TODO: 更健壮的报错?
             TypeKey::IntegerLiteral(_) => Some(self.context.i64_type().as_basic_type_enum()),
             TypeKey::FloatLiteral(_) => Some(self.context.f64_type().as_basic_type_enum()),
             
@@ -102,24 +103,25 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             PrimitiveType::I16 | PrimitiveType::U16 => self.context.i16_type().as_basic_type_enum(),
             PrimitiveType::I32 | PrimitiveType::U32 => self.context.i32_type().as_basic_type_enum(),
             PrimitiveType::I64 | PrimitiveType::U64 => self.context.i64_type().as_basic_type_enum(),
-            PrimitiveType::ISize | PrimitiveType::USize => self.context.i64_type().as_basic_type_enum(), // 假定 64 位
+            PrimitiveType::ISize | PrimitiveType::USize => self.context.i64_type().as_basic_type_enum(), //? TODO: 辅助函数根据目标机器选择(暂时假定 64 位)
             PrimitiveType::F32 => self.context.f32_type().as_basic_type_enum(),
             PrimitiveType::F64 => self.context.f64_type().as_basic_type_enum(),
             PrimitiveType::Bool => self.context.bool_type().as_basic_type_enum(),
             // Unit 暂时用空结构体占位，具体根据上下文可能是 void
+            //? 更详细的处理？
             PrimitiveType::Unit => self.context.struct_type(&[], false).as_basic_type_enum(),
         }
     }
 
     // ========================================================================
-    // 2. 主入口 (Pass Management)
+    // 2. 主入口 
     // ========================================================================
 
     pub fn compile_program(&mut self, program: &Program) {
-        // Pass 1: 注册结构体名称 (Opaque Types)
+        // Pass 1: 注册结构体名称 
         self.register_struct_declarations(&program.items);
 
-        // Pass 2: 填充结构体 Body (Fix Field Ordering)
+        // Pass 2: 填充结构体 Body 
         self.fill_struct_bodies(&program.items);
 
         // Pass 3: 声明所有函数原型
@@ -143,7 +145,6 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     for m in methods { self.compile_function(m).ok(); }
                 }
                 ItemKind::ModuleDecl { items: Some(subs), .. } => self.compile_items(subs),
-                // === 新增：编译结构体静态方法 ===
                 ItemKind::StructDecl(def) => {
                     for m in &def.static_methods {
                         if let Err(e) = self.compile_function(m) {
@@ -151,7 +152,6 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                         }
                     }
                 }
-                // === 新增：编译枚举静态方法 ===
                 ItemKind::EnumDecl(def) => {
                     for m in &def.static_methods {
                         if let Err(e) = self.compile_function(m) {
@@ -188,8 +188,6 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     let st = *self.struct_types.get(&item.id).unwrap();
                     let mut field_types = Vec::new();
                     let mut indices = HashMap::new();
-
-                    // 严格按照 AST 顺序遍历
                     for (i, field) in def.fields.iter().enumerate() {
                         // 从 analyzer 查类型 (Analyzer 存的是 Map<Name, TypeKey>)
                         let field_map = self.analyzer.struct_fields.get(&item.id).expect("Analyzer missed struct");
@@ -247,19 +245,19 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let ret_key = self.analyzer.types.get(&func.id).unwrap();
         
         // 解析 FunctionType
-        // 注意：fn_type 的第二个参数是 is_var_args
         let fn_type = if let TypeKey::Function { ret: Some(r), .. } = ret_key {
              if let TypeKey::Primitive(PrimitiveType::Unit) = **r {
-                 self.context.void_type().fn_type(&param_types, func.is_variadic) // <--- Use AST flag
+                 self.context.void_type().fn_type(&param_types, func.is_variadic) 
              } else {
                 let ret_ty = self.compile_type(r).unwrap();
-                ret_ty.fn_type(&param_types, func.is_variadic) // <--- Use AST flag
+                ret_ty.fn_type(&param_types, func.is_variadic) 
              }
         } else {
-            self.context.void_type().fn_type(&param_types, func.is_variadic) // <--- Use AST flag
+            self.context.void_type().fn_type(&param_types, func.is_variadic) 
         };
 
         // 优先查 mangled_names，如果查不到（理论上不应发生），回退到原始名
+        //? TODO: 更严谨的处理和更多的报错
         let fn_name = self.analyzer.mangled_names.get(&func.id)
             .cloned()
             .unwrap_or(func.name.name.clone());
@@ -270,13 +268,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     }
 
     pub fn compile_function(&mut self, func: &FunctionDefinition) -> Result<(), String> {
-        // 1. 如果没有 body，说明是 extern 声明，直接跳过编译
+        // 如果没有 body，说明是 extern 声明，直接跳过编译
+        //? 更好的extern语法设计？
         if func.body.is_none() {
             return Ok(());
         }
         
-        // 既然上面检查过了，这里我们可以安全地取出 Block 的引用
-        // 使用 as_ref() 把 &Option<Block> 变成 Option<&Block>，然后 unwrap
+        // 既然上面检查过了，这里直接as_ref
         let body_ref = func.body.as_ref().unwrap();
 
         let function = *self.functions.get(&func.id).ok_or("Proto missing")?;
@@ -298,11 +296,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             
             self.variables.insert(param.id, alloca);
         }
-
-        // 2. 【修正点一】传入解包后的引用
         self.compile_block(body_ref)?;
 
-        // 3. 【修正点二】传入解包后的引用
         if !self.block_terminated(body_ref) {
             if func.return_type.is_none() {
                 self.builder.build_return(None).ok();
@@ -332,6 +327,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         match &stmt.kind {
             StatementKind::VariableDeclaration { name, type_annotation: _, initializer, .. } => {
                 // 1. 获取准确类型 (Analyzer 已推导)
+                //？ 支持更多的推导？
+                //？ 新的语法设计？（auto?)
                 let type_key = self.analyzer.types.get(&stmt.id).unwrap();
                 let llvm_ty = self.compile_type(type_key).unwrap();
                 
@@ -383,9 +380,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 if let Some(else_stmt) = else_branch {
                     self.builder.position_at_end(else_bb);
                     self.compile_stmt(else_stmt)?;
-                    // 检查 terminator 比较麻烦，简单处理：如果当前块没结束指令就跳 merge
+                    // 如果当前块没结束指令就跳 merge
+                    //? 完整的terminator检查？
                     if then_bb.get_terminator().is_none() { 
-                         self.builder.build_unconditional_branch(merge_bb).ok(); 
+                        self.builder.build_unconditional_branch(merge_bb).ok(); 
                     }
                 }
 
@@ -459,12 +457,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 let merge_bb = self.context.append_basic_block(parent, "switch_merge");
                 let default_bb = self.context.append_basic_block(parent, "switch_default");
                 
-                // --- 阶段 A: 预创建 Blocks 并收集 Cases 列表 ---
-                // 我们需要一个 Vec 来存储所有的 (数值, Block) 对，传给 Inkwell
+                // --- 预创建 Blocks 并收集 Cases 列表 ---
                 let mut collected_cases = Vec::new();
                 
-                // 同时我们需要保存 (Block, AST_Body) 的对应关系，以便后续填代码
-                // 结构: Vec<(BasicBlock, &Block)>
+                // Vec<(BasicBlock, &Block)>
                 let mut case_blocks_to_compile = Vec::new();
 
                 for case in cases {
@@ -474,12 +470,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     // 记录下来，稍后编译体
                     case_blocks_to_compile.push((case_bb, &case.body));
 
-                    // 遍历该 Case 的所有模式 (Pattern)，将它们都指向这个 case_bb
+                    // 遍历该 Case 的所有Pattern，将它们都指向这个 case_bb
                     for pattern in &case.patterns {
                         // 编译 Pattern 表达式 (必须是常量整数)
                         let pattern_val = self.compile_expr(pattern)?;
                         if !pattern_val.is_int_value() {
-                             return Err("Switch case pattern must be integer".into());
+                            return Err("Switch case pattern must be integer".into());
                         }
                         
                         // 收集到列表中: (IntValue, BasicBlock)
@@ -487,12 +483,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     }
                 }
 
-                // --- 阶段 B: 一次性生成 Switch 指令 ---
-                // Inkwell 0.7.1 API: build_switch(value, default, cases_slice)
+                // --- 一次性生成 Switch 指令 ---
                 self.builder.build_switch(target_int, default_bb, &collected_cases)
                     .map_err(|_| "Build switch failed")?;
 
-                // --- 阶段 C: 填充各个 Case Block 的代码 ---
+                // --- 填充各个 Case Block 的代码 ---
                 for (bb, body) in case_blocks_to_compile {
                     self.builder.position_at_end(bb);
                     self.compile_block(body)?;
@@ -503,7 +498,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     }
                 }
 
-                // --- 阶段 D: 填充 Default Block ---
+                // --- 填充 Default Block ---
                 self.builder.position_at_end(default_bb);
                 if let Some(block) = default_case {
                     self.compile_block(block)?;
@@ -514,7 +509,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     self.builder.build_unconditional_branch(merge_bb).ok();
                 }
 
-                // --- 阶段 E: 结束 ---
+                // ---结束 ---
                 self.builder.position_at_end(merge_bb);
                 Ok(())
             }
@@ -529,7 +524,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     }
 
     // ========================================================================
-    // 6. 表达式编译 (R-Value & L-Value)
+    // 6. 表达式编译 
     // ========================================================================
 
     pub fn compile_expr(&mut self, expr: &Expression) -> Result<BasicValueEnum<'ctx>, String> {
@@ -545,19 +540,15 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             ExpressionKind::Unary { op, operand } => {
                 match op {
                     // 1. 取地址 (x&)
-                    // 不需要计算 operand 的值，而是计算它的地址 (L-Value)
                     UnaryOperator::AddressOf => {
                         let ptr = self.compile_expr_ptr(operand)?;
                         Ok(ptr.as_basic_value_enum())
                     }
 
                     // 2. 解引用 (ptr^)
-                    // 先计算 operand 的值 (它必须是个指针)，然后 Load 它指向的数据
                     UnaryOperator::Dereference => {
                         let ptr = self.compile_expr(operand)?.into_pointer_value();
-                        
-                        // Opaque Pointers 需要知道 Load 什么类型的数据
-                        // 我们查 Analyzer 计算出的“解引用后的类型”
+            
                         let res_type_key = self.analyzer.types.get(&expr.id)
                             .ok_or("Dereference result type missing in analyzer")?;
                         
@@ -583,15 +574,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     }
 
                     // 4. 非 (!x)
-                    // 在 LLVM 中，build_not 本质是按位取反 (XOR -1)
-                    // 对于 Bool (i1): !0(false) = 1(true), !1(true) = 0(false)。逻辑正确。
-                    // 对于 Int (u8..): 按位取反。逻辑也正确。
                     UnaryOperator::Not => {
                         let val = self.compile_expr(operand)?;
                         if val.is_int_value() {
                             Ok(self.builder.build_not(val.into_int_value(), "not").unwrap().into())
                         } else {
-                            // Analyzer 应该拦截了非 Int/Bool 类型
+                            //? Analyzer 应该拦截了非 Int/Bool 类型
+                            //? 更严谨的检查和报错
                             Err("Not operand must be integer or boolean".into())
                         }
                     }
@@ -610,8 +599,6 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             ExpressionKind::Call { callee, arguments } => self.compile_call(callee, arguments),
             
             ExpressionKind::Cast { expr: src_expr, target_type } => {
-                // 注意：这里需要传入当前 Cast 表达式的 ID (expr.id)
-                // 这样 compile_cast 才能从 Analyzer 获取到目标类型 TypeKey
                 self.compile_cast(src_expr, target_type, expr.id)
             },
 
@@ -622,8 +609,6 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 let mut struct_val = struct_type.get_undef();
 
                 let index_map = self.struct_field_indices.get(def_id).unwrap().clone();
-
-                // 现在 self 自由了，可以在循环里调用 compile_expr (mut self)
                 for field in fields {
                     let val = self.compile_expr(&field.value)?;
                     let idx = *index_map.get(&field.field_name.name).unwrap();
@@ -638,7 +623,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             },
 
             ExpressionKind::MethodCall { receiver, method_name, arguments } => {
-                // 1. 获取 Receiver 的类型，以便去查找方法表
+                // 1. 获取 Receiver 的类型
                 let receiver_ty_key = self.analyzer.types.get(&receiver.id).unwrap();
                 
                 // 2. 查 Analyzer 的 method_registry 找到对应的函数定义 ID
@@ -664,7 +649,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 let call_site = self.builder.build_call(fn_val, &compiled_args, "method_call")
                     .map_err(|_| "Method call failed")?;
 
-                // 5. 处理返回值 (与 Call 逻辑一致)
+                // 5. 处理返回值
                 use inkwell::values::ValueKind;
                 match call_site.try_as_basic_value() {
                     ValueKind::Basic(val) => Ok(val),
@@ -674,16 +659,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             },
 
             ExpressionKind::StaticAccess { target: _, member: _ } => {
-                // 通常 StaticAccess 在 Analyzer 阶段会被解析为具体的常量值
-                // 尤其是 Enum Variant。
-                // 我们在之前的 Switch 讨论中决定让 Analyzer 把 Enum Variant 回写为 IntegerLiteral。
-                
                 if let Some(TypeKey::IntegerLiteral(val)) = self.analyzer.types.get(&expr.id) {
-                    // 如果 Analyzer 已经回写了具体数值 (discriminant)
-                    // 默认生成 i64，或者你可以去查 Enum 定义看它的 underlying type
+                    // 默认生成 i64
+                    //? TODO: 查 Enum的underlying type生成具体的跳转
                     Ok(self.context.i64_type().const_int(*val, false).as_basic_value_enum())
                 } else {
-                    // 可能是读取静态变量 (Static Var)，目前先留空或报错
+                    // 可能是读取静态变量 (Static Var)，暂时报错
+                    //? TODO: Enum 读取静态变量?
                     Err("Static access (non-enum) not implemented".into())
                 }
             },
@@ -797,13 +779,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let r = rhs_val.into_int_value();
 
         match op {
-            // 加减乘：LLVM 底层指令对于有符号/无符号是一样的 (Two's complement)
-            // 除非我们需要检测溢出 (nsw/nuw)，否则用同一套指令
+            // 加减乘：LLVM 底层指令对于有符号/无符号是一样的 
+            //? TODO：检测溢出 (nsw/nuw)
             BinaryOperator::Add => Ok(self.builder.build_int_add(l, r, "add").unwrap().into()),
             BinaryOperator::Subtract => Ok(self.builder.build_int_sub(l, r, "sub").unwrap().into()),
             BinaryOperator::Multiply => Ok(self.builder.build_int_mul(l, r, "mul").unwrap().into()),
             
-            // 位运算：也是一样的
+            // 位运算
             BinaryOperator::BitwiseAnd => Ok(self.builder.build_and(l, r, "and").unwrap().into()),
             BinaryOperator::BitwiseOr => Ok(self.builder.build_or(l, r, "or").unwrap().into()),
             BinaryOperator::BitwiseXor => Ok(self.builder.build_xor(l, r, "xor").unwrap().into()),
@@ -859,10 +841,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             BinaryOperator::Divide => Ok(self.builder.build_float_div(l, r, "fdiv").unwrap().into()),
             BinaryOperator::Modulo => Ok(self.builder.build_float_rem(l, r, "frem").unwrap().into()),
             
-            // 浮点数比较需要使用 FloatPredicate
-            // OEQ (Ordered Equal): 都不为 NaN 且相等
-            // UEQ (Unordered Equal): 可以是 NaN
-            // 通常编程语言语义是 OEQ
+            // 9是OEQ (Ordered Equal), FloatRredicate 都不为 NaN 且相等
             BinaryOperator::Equal => Ok(self.builder.build_float_compare(FloatPredicate::OEQ, l, r, "feq").unwrap().into()),
             BinaryOperator::NotEqual => Ok(self.builder.build_float_compare(FloatPredicate::ONE, l, r, "fne").unwrap().into()),
             BinaryOperator::Less => Ok(self.builder.build_float_compare(FloatPredicate::OLT, l, r, "flt").unwrap().into()),
@@ -881,7 +860,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             compiled_args.push(self.compile_expr(arg)?.into());
         }
 
-        // 2. 尝试“直接调用” (Direct Call) - 优化路径
+        // 2. 尝试Direct Call
         // 如果 callee 是一个直接的 Path，且该 Path 指向已知的函数定义
         if let ExpressionKind::Path(path) = &callee.kind {
             if let Some(def_id) = self.analyzer.path_resolutions.get(&path.id) {
@@ -894,7 +873,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             }
         }
 
-        // === Case B: 静态方法调用 (Struct::method) ===
+        // 静态方法调用 (Struct::method)
         if let ExpressionKind::StaticAccess { target: _, member } = &callee.kind {
             if let Some(def_id) = self.analyzer.path_resolutions.get(&callee.id) {
                  if let Some(fn_val) = self.functions.get(def_id) {
@@ -907,12 +886,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
         // 3. “间接调用” (Indirect Call) - 函数指针
         // 如果走到这里，说明 callee 是一个表达式（比如变量、数组元素、返回函数指针的函数调用等）
+        //? TODO: 设计语法支持间接调用?
+        //? TODO: 闭包?
         
         // A. 编译表达式得到函数指针 (PointerValue)
         let fn_ptr_val = self.compile_expr(callee)?.into_pointer_value();
 
-        // B. 获取函数类型签名 (LLVM BuildCall2 需要显式签名)
-        // 我们需要查 Analyzer，看这个表达式的类型是什么
+        // B. 获取函数类型签名 
         let callee_type_key = self.analyzer.types.get(&callee.id)
             .ok_or("Callee type missing in analyzer")?;
         
@@ -926,7 +906,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.handle_call_return(call_site)
     }
 
-    // --- 辅助函数 1: 统一处理返回值 ---
+    // 辅助函数: 统一处理返回值 
     fn handle_call_return(&self, call_site: inkwell::values::CallSiteValue<'ctx>) -> Result<BasicValueEnum<'ctx>, String> {
         use inkwell::values::ValueKind;
         match call_site.try_as_basic_value() {
@@ -939,10 +919,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
     }
 
-    // --- 辅助函数 2: 提取函数签名 ---
-    // 这个函数专门用于间接调用，因为 compile_type 把函数转成了 ptr，我们需要还原出 FunctionType
-    // src/codegen.rs
-
+    // 辅助函数: 提取函数签名
     fn compile_function_type_signature(&self, key: &TypeKey) -> Result<FunctionType<'ctx>, String> {
         match key {
             // 解构加上 is_variadic
@@ -957,13 +934,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 // 2. 转换返回值类型，并传入 is_variadic
                 if let Some(ret_key) = ret {
                     if let TypeKey::Primitive(PrimitiveType::Unit) = **ret_key {
-                        Ok(self.context.void_type().fn_type(&param_types, *is_variadic)) // <--- Use it
+                        Ok(self.context.void_type().fn_type(&param_types, *is_variadic)) 
                     } else {
                         let ret_llvm_ty = self.compile_type(ret_key).ok_or("Failed to compile ret type")?;
-                        Ok(ret_llvm_ty.fn_type(&param_types, *is_variadic)) // <--- Use it
+                        Ok(ret_llvm_ty.fn_type(&param_types, *is_variadic)) 
                     }
                 } else {
-                    Ok(self.context.void_type().fn_type(&param_types, *is_variadic)) // <--- Use it
+                    Ok(self.context.void_type().fn_type(&param_types, *is_variadic)) 
                 }
             },
             
@@ -1003,11 +980,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 PrimitiveType::I64 | PrimitiveType::ISize
             ),
             // 字面量如果没有被 Analyzer 固化为具体类型，
-            // 默认行为通常视作有符号 (i64)，或者你希望默认无符号也可以。
-            // 这里我们保持保守，视作有符号。
+            // 默认行为通常视作有符号i64
             TypeKey::IntegerLiteral(_) => true,
             
-            // 指针、Char、Bool、数组等通常视为无符号用于比较
+            // 指针、Char、Bool、数组等视为无符号用于比较
             _ => false, 
         }
     }
@@ -1016,9 +992,9 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         // 1. 编译源表达式
         let src_val = self.compile_expr(src_expr)?;
         
-        // 2. 获取类型信息 (Analyzer 已经计算好了)
+        // 2. 获取类型信息 
         // src_key: 源表达式的语义类型
-        // target_key: Cast 表达式本身的语义类型 (即目标类型)
+        // target_key: Cast 表达式本身的语义类型 
         let src_key = self.analyzer.types.get(&src_expr.id).ok_or("Source type missing")?;
         let target_key = self.analyzer.types.get(&cast_expr_id).ok_or("Target type missing")?;
         
@@ -1059,8 +1035,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 
                 let src_float = src_val.into_float_value();
                 let target_float_ty = target_llvm_ty.into_float_type();
-                // 注意：F32->F64 是 Ext, F64->F32 是 Trunc (LLVM 术语不同于 Int)
-                // 实际上 Inkwell build_float_cast 会自动处理 Ext/Trunc
+                //? Inkwell build_float_cast 会自动处理 Ext/Trunc?
                 Ok(self.builder.build_float_cast(src_float, target_float_ty, "fpcast").unwrap().into())
             },
 
@@ -1108,19 +1083,17 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
             // === Case G: 指针 -> 指针 (Bitcast) ===
             (TypeKey::Pointer(..), TypeKey::Pointer(..)) => {
-                // Opaque Pointers 下这通常是 No-op，但如果涉及 AddressSpace 转换需要 addrspacecast
-                // 这里简单处理为 bitcast (LLVM 会自动优化)
+                // Opaque Pointers 下通常是 No-op，但如果涉及 AddressSpace 转换需要 addrspacecast
+                // 暂时bitcast 
+                //? LLVM 会自动优化?
                 let src_ptr = src_val.into_pointer_value();
                 let target_ptr_ty = target_llvm_ty.into_pointer_type();
                 Ok(self.builder.build_pointer_cast(src_ptr, target_ptr_ty, "bitcast").unwrap().into())
             },
 
             // === Case H: 数组 -> 指针 (Array Decay) ===
-            // Analyzer 可能会允许 array as *T
             (TypeKey::Array(..), TypeKey::Pointer(..)) => {
-                 // 数组 Decay 在 compile_expr 层面通常处理为 GEP(0, 0)
-                 // 但如果用户显式写了 `arr as *T`，这里需要处理
-                 // 如果 src_val 已经是 Pointer (因为 LLVM Array 传参通常是指针)，直接 Bitcast
+                 // 如果 src_val 已经是 Pointer，直接 Bitcast
                  if src_val.is_pointer_value() {
                      let src_ptr = src_val.into_pointer_value();
                      let target_ptr_ty = target_llvm_ty.into_pointer_type();
@@ -1135,7 +1108,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
     }
 
-    // 【新增/修改】全局变量编译逻辑
+    // 全局变量编译逻辑
     fn compile_global_variable(&mut self, id: DefId, def: &GlobalDefinition) {
         // 1. 获取类型
         let ty_key = self.analyzer.types.get(&id).unwrap();
@@ -1152,26 +1125,22 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         
         // 5. 设置初始化值
         if let Some(init) = &def.initializer {
-            // 策略 A: 如果是简单字面量 (String, Float, Bool)，直接编译
-            // (因为我们的 eval_constant_expr 目前主要处理整数)
+            // A: 如果是简单字面量 (String, Float, Bool)，直接编译
             if let ExpressionKind::Literal(lit) = &init.kind {
                 let lit_ty = self.analyzer.types.get(&init.id).unwrap();
                 let val = self.compile_literal(lit, lit_ty).expect("Literal compile failed");
                 global.set_initializer(&val);
             } 
-            // 策略 B: 如果 Analyzer 已经计算出了整数值 (适用于 Int 运算和 指针强转)
+            // B: 如果 Analyzer 已经计算出了整数值 (Int 运算和 指针强转)
             else if let Some(&const_val) = self.analyzer.constants.get(&id) {
-                // const_val 是 u64，我们需要根据 llvm_ty 把它转成 LLVM 常量
-                
                 if llvm_ty.is_int_type() {
                     // 情况 1: 整数类型 (i32, u64...)
                     let int_ty = llvm_ty.into_int_type();
-                    // false 表示视为无符号处理 (raw bits)，这对于 bitmask 很重要
+                    // 视为无符号处理raw bits
                     let val = int_ty.const_int(const_val, false);
                     global.set_initializer(&val.as_basic_value_enum());
                 } else if llvm_ty.is_pointer_type() {
-                    // 情况 2: 指针类型 (例如 0xB8000 as *u16)
-                    // LLVM 要求使用 const_int_to_ptr 指令
+                    // 情况 2: 指针类型 (e.g., 0xB8000 as *u16)
                     let i64_ty = self.context.i64_type();
                     let int_val = i64_ty.const_int(const_val, false);
                     
@@ -1179,6 +1148,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     global.set_initializer(&ptr_val.as_basic_value_enum());
                 } else {
                     // 其他类型暂不支持计算初始化 (比如 Struct 常量，需要 const struct builder)
+                    //?: TODO: 支持更多的计算初始化
                     panic!("Global variable has computed value but type {:?} is not supported for auto-init yet", llvm_ty);
                 }
             } else {
@@ -1193,7 +1163,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.variables.insert(id, global.as_pointer_value());
     }
 
-    // 辅助：判断是否是整数类 (包括 Bool, Char, Unit)
+    // 判断是否是整数类 (包括 Bool, Char, Unit)
     fn is_integer_kind(&self, p: &PrimitiveType) -> bool {
         match p {
             PrimitiveType::F32 | PrimitiveType::F64 => false,
@@ -1201,7 +1171,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
     }
     
-    // 辅助：判断是否是浮点类
+    // 判断是否是浮点类
     fn is_float_kind(&self, p: &PrimitiveType) -> bool {
         match p {
             PrimitiveType::F32 | PrimitiveType::F64 => true,

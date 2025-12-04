@@ -4,4 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clap = { version = "*", features = ["derive"] }
 inkwell = { version = "*", features = ["llvm20-1"] }

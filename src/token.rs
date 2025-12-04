@@ -1,7 +1,6 @@
 use crate::source::Span;
 
-// 完整的 Token
-#[derive(Debug, Clone, Copy)] // Copy 很关键，让 Token 传递极其廉价
+#[derive(Debug, Clone, Copy)] 
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
@@ -21,34 +20,24 @@ impl Token {
     }
 }
 
-// 使用 macro_rules! 复刻 X-Macro 模式
 macro_rules! define_tokens {
     (
-        // 1. 动态 Token (需要携带数据或单纯作为占位)
         dynamic { $($dyn_variant:ident),* $(,)? }
-
-        // 2. 关键字 (Keywords) - 自动生成字符串匹配
-        // 格式: "text" => VariantName
         keywords { $($kw_text:literal => $kw_variant:ident),* $(,)? }
-
-        // 3. 符号 (Symbols)
-        // 格式: "text" => VariantName
         symbols { $($sym_text:literal => $sym_variant:ident),* $(,)? }
     ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum TokenKind {
-            // 特殊 Token
             EOF,
-            ERROR, // 词法错误可以暂存这里
+            ERROR,
 
-            // 宏展开部分
             $($dyn_variant),*,
             $($kw_variant),*,
             $($sym_variant),*,
         }
 
         impl TokenKind {
-            /// 获取 Token 的字面量表示 (用于调试或报错)
+            /// 获取 Token 的字面量表示 
             pub fn as_str(&self) -> &'static str {
                 match self {
                     TokenKind::EOF => "EOF",
@@ -71,9 +60,6 @@ macro_rules! define_tokens {
     };
 }
 
-// ==========================================
-// 在这里统一填写所有的 Token 定义
-// ==========================================
 define_tokens! {
     dynamic {
         Identifier,
@@ -95,9 +81,9 @@ define_tokens! {
 
         // 值
         "true"  => True,  "false" => False,
-        "self"  => SelfVal, // 小写的 self
+        "self"  => SelfVal, 
 
-        // 逻辑与位运算 (关键字形式)
+        // 逻辑与位运算 
         "and"   => And,
         "or"    => Or,
         "band"  => BitAnd, // 按位与

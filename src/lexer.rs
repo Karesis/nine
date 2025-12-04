@@ -20,7 +20,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// 核心入口：获取下一个 Token
+    /// 获取下一个 Token
     pub fn next_token(&mut self) -> Token {
         self.skip_whitespace_and_comments();
 
@@ -59,10 +59,9 @@ impl<'a> Lexer<'a> {
             '&' => self.make_token(TokenKind::Ampersand), // AddrOf
             '|' => self.make_token(TokenKind::Pipe),  // Switch pattern
 
-            // 需要向前看一位 (Lookahead) 的符号
+            // 需要向前看的符号
             '.' => {
                 // 检查是否是 '...'
-                // 我们需要连续 peek 两个字符
                 let mut lookahead = self.chars.clone();
                 let next1 = lookahead.next();
                 let next2 = lookahead.next();
@@ -150,7 +149,6 @@ impl<'a> Lexer<'a> {
         let text = &self.src[self.start_pos..self.current_pos];
 
         // 检查是否是关键字
-        // TokenKind::lookup_keyword 是我们在 macro 里生成的函数
         let kind = TokenKind::lookup_keyword(text).unwrap_or(TokenKind::Identifier);
 
         self.make_token(kind)
@@ -158,11 +156,9 @@ impl<'a> Lexer<'a> {
 
     fn scan_number(&mut self) -> Token {
         // 1. 检查起始字符是否为 '0'
-        // 注意：self.start_pos 是当前 Token 的起始位置，即 '0' 的位置
         let start_char = self.src.as_bytes()[self.start_pos] as char;
 
         if start_char == '0' {
-            // 只有以 0 开头，才检查后续是否是 x, b, o
             // 此时 self.chars.peek() 指向的是 '0' 后面的那个字符 (例如 'x')
             if let Some(&c) = self.chars.peek() {
                 match c {
@@ -202,12 +198,12 @@ impl<'a> Lexer<'a> {
                         }
                         return self.make_token(TokenKind::Integer);
                     }
-                    _ => {} // 后面不是 x/b/o，那是普通的 0 或者 0.123
+                    _ => {} // 后面不是 x/b/o，是普通的 0 或者 0.123
                 }
             }
         }
 
-        // 2. 普通十进制扫描 (处理剩下的数字)
+        // 2. 普通十进制扫描 
         // 如果是 0xB8...，上面的分支会返回，不会走到这里
         // 如果是 123，会走到这里
         while let Some(&c) = self.chars.peek() {
@@ -335,7 +331,6 @@ impl<'a> Lexer<'a> {
     }
 }
 
-// 独立的字符判断函数，保持代码整洁
 fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }

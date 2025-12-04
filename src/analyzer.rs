@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use crate::ast::*;
 use crate::source::Span;
+use crate::diagnostic::Diagnosable;
 
 /// 定义 ID：指向 AST 中的节点
 pub type DefId = NodeId;
 
 /// ======================================================
-/// 1. 语义类型键 (TypeKey)
+/// 语义类型键 
 /// ======================================================
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeKey {
@@ -27,7 +28,7 @@ pub enum TypeKey {
 }
 
 /// ======================================================
-/// 2. 上下文与核心表结构
+/// 上下文与核心表结构
 /// ======================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +97,15 @@ pub struct AnalyzeError {
     pub span: Span,
 }
 
+impl Diagnosable for AnalyzeError {
+    fn span(&self) -> Span {
+        self.span
+    }
+    fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 /// ======================================================
 /// 3. Analyzer 主逻辑
 /// ======================================================
@@ -144,7 +154,7 @@ impl Analyzer {
     }
 
     /// ==================================================
-    /// Phase 1: 声明扫描 (Declaration Scan)
+    /// Phase 1: 声明扫描 
     /// ==================================================
     fn scan_declarations(&mut self, items: &[Item]) {
         for item in items {
@@ -157,12 +167,12 @@ impl Analyzer {
                     if let Some(subs) = sub_items {
                         self.enter_scope(ScopeKind::Module);
                         
-                        // 【修改】压入路径栈
+                        // 压入路径栈
                         self.module_path.push(name.name.clone());
                         
                         self.scan_declarations(subs); 
                         
-                        // 【修改】弹出路径栈
+                        // 弹出路径栈
                         self.module_path.pop();
                         
                         let module_scope = self.exit_scope();
@@ -179,7 +189,7 @@ impl Analyzer {
                     self.register_static_methods(item.id, &def.static_methods);
                 }
 
-                // --- 【补全】联合体 ---
+                // --- 联合体 ---
                 ItemKind::UnionDecl(def) => {
                     self.define_symbol(def.name.name.clone(), item.id, def.name.span);
                     // 【新增】
@@ -211,8 +221,8 @@ impl Analyzer {
                 ItemKind::FunctionDecl(def) => {
                     self.define_symbol(def.name.name.clone(), def.id, def.name.span);
                     
-                    // 【新增】生成并记录修饰名
-                    // 比如 math 模块下的 add -> math_add
+                    // 生成并记录修饰名
+                    // e.g., math 模块下的 add -> math_add
                     let mangled = self.generate_mangled_name(&def.name.name);
                     self.ctx.mangled_names.insert(def.id, mangled);
                 }
@@ -225,7 +235,7 @@ impl Analyzer {
                     // 1. 注册符号
                     self.define_symbol(def.name.name.clone(), item.id, def.name.span);
                     
-                    // 2. 注册修饰名 (Mangled Name)
+                    // 2. 注册修饰名 
                     let mangled = self.generate_mangled_name(&def.name.name);
                     self.ctx.mangled_names.insert(item.id, mangled);
                     
@@ -238,7 +248,7 @@ impl Analyzer {
         }
     }
 
-    // 辅助：注册静态方法 (减少 Struct/Union 代码重复)
+    // 辅助函数：注册静态方法 
     fn register_static_methods(&mut self, item_id: DefId, methods: &[FunctionDefinition]) {
         let mut static_scope = Scope::new(ScopeKind::Module);
         for method in methods {
@@ -252,7 +262,7 @@ impl Analyzer {
     }
 
     /// ==================================================
-    /// Phase 2: 实现扫描 (Implementation Scan)
+    /// Phase 2: 实现扫描 
     /// ==================================================
     fn scan_implementations(&mut self, items: &[Item]) {
         for item in items {
@@ -262,12 +272,12 @@ impl Analyzer {
                         if let Some(scope) = self.ctx.namespace_scopes.get(&item.id) {
                             self.scopes.push(scope.clone());
                             
-                            // 【新增】压入模块路径
+                            // 压入模块路径
                             self.module_path.push(name.name.clone());
                             
                             self.scan_implementations(subs);
                             
-                            // 【新增】弹出模块路径
+                            // 弹出模块路径
                             self.module_path.pop();
                             
                             self.scopes.pop();
@@ -298,7 +308,7 @@ impl Analyzer {
                     let key = self.resolve_ast_type(target_type);
                     if let TypeKey::Error = key { continue; }
 
-                    // 2. 【新增】生成修饰名并注册
+                    // 2. 生成修饰名并注册
                     let type_name = self.get_mangling_type_name(target_type);
                     
                     for method in methods {
@@ -311,19 +321,18 @@ impl Analyzer {
                         self.ctx.mangled_names.insert(method.id, mangled);
                     }
 
-                    // 2. 【Clone】取出当前的注册表（复印件）
+                    // 2. 取出当前的注册表（clone）
                     // 此时 self 的借用立即结束
                     let mut local_registry = self.ctx.method_registry
                         .get(&key)
                         .cloned()
                         .unwrap_or_default();
                     
-                    // 3. 【Modify】修改复印件
+                    // 3. 修改复印件
                     // 因为 local_registry 是本地变量，不借用 self，
-                    // 所以你在循环里可以尽情调用 self.error()！
+                    // 所以这里的循环中调用self.error()是可以的
                     for method in methods {
                         if local_registry.contains_key(&method.name.name) {
-                            // 现在可以安全报错了！完美解决！
                             self.error(
                                 format!("Duplicate method '{}'", method.name.name), 
                                 method.name.span
@@ -338,7 +347,7 @@ impl Analyzer {
                         }
                     }
 
-                    // 4. 【Write Back】把修改好的复印件塞回去
+                    // 4. 修改好的复印件写回
                     self.ctx.method_registry.insert(key, local_registry);
                 }
                 _ => {} 
@@ -347,7 +356,7 @@ impl Analyzer {
     }
 
     /// ==================================================
-    /// Phase 3: 签名解析 (Signature Resolution)
+    /// Phase 3: 签名解析 
     /// ==================================================
    fn resolve_signatures(&mut self, items: &[Item]) {
         for item in items {
@@ -421,7 +430,7 @@ impl Analyzer {
     }
 
     /// ==================================================
-    /// Phase 4: 函数体检查 (Check Bodies)
+    /// Phase 4: 函数体检查
     /// ==================================================
 
     fn record_type(&mut self, id: NodeId, ty: TypeKey) {
@@ -474,7 +483,7 @@ impl Analyzer {
         use PrimitiveType::*;
         match p {
             U8 => val <= u8::MAX as u64,
-            I8 => val <= i8::MAX as u64, // 简化版，未处理负数
+            I8 => val <= i8::MAX as u64, //? TODO: 未处理负数??处理了吗？
             U16 => val <= u16::MAX as u64,
             I16 => val <= i16::MAX as u64,
             U32 => val <= u32::MAX as u64,
@@ -511,33 +520,24 @@ impl Analyzer {
                     let declared_ty = self.ctx.types.get(&item.id).unwrap().clone();
                     
                     if let Some(init) = &def.initializer {
-                        // 1. 检查类型 (原有逻辑)
+                        // 1. 检查类型 
                         let init_ty = self.check_expr(init);
                         self.check_type_match(&declared_ty, &init_ty, init.span);
                         self.coerce_literal_type(init.id, &declared_ty, &init_ty);
                         
-                        // ===============================================
-                        // 【第三步新增】：全局初始化求值
-                        // ===============================================
-                        
+                        // 全局初始化求值
+
                         // 尝试计算表达式的值 (例如 1 << 12)
                         if let Some(val) = self.eval_constant_expr(init) {
-                            // 算出来了！
-                            
                             // 如果是 const 定义，必须注册到常量表，供后续引用
                             if def.modifier == Mutability::Constant {
                                 self.ctx.constants.insert(item.id, val);
                             }
-                            
-                            // 重要：对于 mut/set 全局变量，虽然不用注册给别人用，
-                            // 但算出值来对 Codegen 很有用（Codegen 可以直接用这个值生成 Global Initializer）
-                            // 我们可以把这个值也临时存到 constants 表里，或者专门开一个 global_init_values 表。
-                            // 为了简单，我们暂且都存入 constants 表。
+                            //? mut 和 set?单独开个map?
                             self.ctx.constants.insert(item.id, val);
 
                         } else {
-                            // 如果算不出来（比如调用了函数），在 OS 开发初期，我们报错
-                            // 因为我们还没有实现 __cxa_atexit 这种运行时全局构造机制
+                            //? TODO: 待实现实现 __cxa_atexit运行时全局构造机制
                             self.error("Global initializer must be a constant expression (integer arithmetic)", init.span);
                         }
 
@@ -601,12 +601,9 @@ impl Analyzer {
                     self.check_type_match(&declared_type, &init_type, init_expr.span);
                     self.coerce_literal_type(init_expr.id, &declared_type, &init_type);
                     if *modifier == Mutability::Constant {
-                        // 调用我们上一轮写好的求值器
                         if let Some(val) = self.eval_constant_expr(init_expr) {
                             // 存入 Context 的常量表
                             self.ctx.constants.insert(stmt.id, val);
-                            
-                            // 顺便打印一下调试信息，看看是否算对了
                             // println!("DEBUG: Constant '{}' evaluated to {}", name.name, val);
                         } else {
                             self.error("Constant value must be computable at compile time (literals only for now)", init_expr.span);
@@ -629,11 +626,11 @@ impl Analyzer {
                     }
                 }
 
-                // 2. 注册符号和类型 (保持不变)
+                // 2. 注册符号和类型 
                 self.define_symbol(name.name.clone(), stmt.id, name.span);
                 self.record_type(stmt.id, declared_type);
                 
-                // 3. 记录可变性 (保持不变)
+                // 3. 记录可变性 
                 self.ctx.mutabilities.insert(stmt.id, *modifier);
             }
 
@@ -687,8 +684,6 @@ impl Analyzer {
                     self.error("Return statement outside of function context.", stmt.span);
                 }
             }
-
-            // --- 【补全】流程控制检查 ---
             StatementKind::If { condition, then_block, else_branch } => {
                 let cond_ty = self.check_expr(condition);
                 self.check_type_match(&TypeKey::Primitive(PrimitiveType::Bool), &cond_ty, condition.span);
@@ -765,7 +760,7 @@ impl Analyzer {
                 let rhs_ty = self.check_expr(rhs);
                 self.check_type_match(&lhs_ty, &rhs_ty, expr.span);
 
-                // 2. 【核心修复】尝试双向固化字面量
+                // 尝试双向固化字面量
                 // 如果 lhs 是 i32 变量，rhs 是字面量 50，这里会把 50 固化为 i32
                 self.coerce_literal_type(rhs.id, &lhs_ty, &rhs_ty);
                 // 反之亦然（例如 50 + x）
@@ -784,12 +779,11 @@ impl Analyzer {
             ExpressionKind::StructLiteral { type_name, fields } => {
                 if let Some(def_id) = self.resolve_path(type_name) {
                     
-                    // --- 修改开始：直接在一个循环里完成所有逻辑 ---
                     for init in fields {
-                        // 1. 先算出实际给的值是什么类型 (例如 IntegerLiteral(10))
+                        // 1. 先计算实际给的值的类型 (e.g., IntegerLiteral(10))
                         let actual_ty = self.check_expr(&init.value);
                         
-                        // 2. 查找结构体定义中这个字段期望的类型 (例如 u8)
+                        // 2. 查找结构体定义中这个字段期望的类型 (e.g., u8)
                         let field_name = &init.field_name.name;
                         let expected_ty_opt = self.ctx.struct_fields
                             .get(&def_id)
@@ -808,13 +802,11 @@ impl Analyzer {
                                 self.error(format!("Struct has no field named '{}'", field_name), init.field_name.span);
                             } else {
                                 self.error("Not a struct definition", type_name.span);
-                                // 这里 return Error 会导致后续字段不检查，或者 break 也可以
-                                // 为了简单，这里直接返回 Error 结束整个结构体的检查
+                                //? 更多的sync和报错?
                                 return TypeKey::Error; 
                             }
                         }
                     }
-                    // --- 修改结束 ---
 
                     TypeKey::Named(def_id)
                 } else {
@@ -867,21 +859,20 @@ impl Analyzer {
                         self.coerce_literal_type(arg_expr.id, param_ty, &arg_actual_ty);
                     }
 
-                    // 3. 处理变长参数 (Varargs)
-                    // 对于多出来的参数，我们也需要 check_expr 以便计算它们的类型（否则 Codegen 查表会 panic）
+                    // 3. 处理变长参数 
+                    // 对于多出来的参数，需要 check_expr 以便计算它们的类型（否则 Codegen 查表会 panic）
                     if arguments.len() > params.len() {
                         for arg_expr in &arguments[params.len()..] {
                             let arg_ty = self.check_expr(arg_expr);
                             
-                            // 这里有一个关键点：C 语言的变长参数有“默认提升规则” (Default Argument Promotions)
+                            // C 语言的变长参数的Default Argument Promotions
                             // float -> double
                             // char/short -> int
-                            // 我们可以简单地针对字面量做一个默认回写，防止 Codegen 瞎猜 i64
-                            
-                            // 策略：如果是整数字面量，且没被约束，默认回写为 i32 (符合 C 的 int 提升)
+                            // 如果是整数字面量，且没被约束，默认回写为 i32 (int 提升)
                             if let TypeKey::IntegerLiteral(val) = arg_ty {
-                                // 检查大小：如果超过 u32::MAX，说明必须用 i64
-                                // 否则默认提升为 i32 (符合 C ABI)
+                                // 如果超过 u32::MAX，说明必须用 i64
+                                // 否则默认提升为 i32 
+                                //? 确认检查+test?
                                 let target_type = if val > u32::MAX as u64 {
                                     TypeKey::Primitive(PrimitiveType::I64)
                                 } else {
@@ -951,11 +942,11 @@ impl Analyzer {
                 if !is_index_valid {
                     self.error("Array index must be an integer", index.span);
                 } else {
-                    // 固化索引字面量类型 (建议统一固化为 i64 或 usize，为了方便 Codegen，这里选 i64)
+                    // 固化索引字面量类型 (统一固化i64)
                     self.coerce_literal_type(index.id, &TypeKey::Primitive(PrimitiveType::I64), &index_ty);
                 }
 
-                // 3. 核心：检查 Target 类型并解包
+                // 3. 检查 Target 类型并解包
                 match target_ty {
                     TypeKey::Array(inner, _size) => {
                         // 如果是数组 [T; N]，索引操作的结果类型就是 T
@@ -963,7 +954,7 @@ impl Analyzer {
                     }
                     
                     TypeKey::Pointer(_, _) => {
-                        // 【严格检查】禁止指针使用 []
+                        // 禁止指针使用 []
                         self.error("Cannot index a pointer with '[]'. Pointers and Arrays are distinct in 9-lang.", target.span);
                         TypeKey::Error
                     }
@@ -978,42 +969,40 @@ impl Analyzer {
             },
 
             ExpressionKind::StaticAccess { target, member } => {
-                // 1. 检查 Target 类型 (Struct Name 或 Enum Name)
-                let target_ty = self.check_expr(target); // 这应该返回 TypeKey::Named(def_id)
+                // 检查 Target 类型 (Struct Name 或 Enum Name)
+                let target_ty = self.check_expr(target); 
                 if let TypeKey::Named(container_id) = target_ty {
-                    // 2. 在 container (struct/enum) 的命名空间里查找 member
+                    // 在 container (struct/enum) 的命名空间里查找 member
                     if let Some(scope) = self.ctx.namespace_scopes.get(&container_id) {
                         
                         if let Some(&def_id) = scope.symbols.get(&member.name) {
-                            // 找到了！(可能是静态方法，也可能是 Enum Variant)
+                            // 找到了(可能是静态方法，也可能是 Enum Variant)
                             let found_type = self.get_type_of_def(def_id);
+                            //? found_types 检查?
                             
                             // 记录解析结果，供 Codegen 使用
                             self.ctx.path_resolutions.insert(expr.id, def_id);
                             
                             // 返回类型
                             if let Some(ty) = self.get_type_of_def(def_id) {
-                                // 如果是 Enum Variant，之前已经有逻辑处理为 IntegerLiteral
-                                // 这里我们主要关注 Function
+                                // 如果是 Enum Variant，已经处理为 IntegerLiteral
+                                //? 这里只检查Function
                                 self.record_type(expr.id, ty.clone());
                                 return ty;
                             }
                         }
                     }
                 }
-                // Fallback 到之前的 Enum IntegerLiteral 逻辑 (如果有)
-                // ...
+                //? TODO: Fallback 到Enum IntegerLiteral?
                 TypeKey::Error
             },
 
-            // --- 【补全】一元运算 ---
+            // --- 一元运算 ---
             ExpressionKind::Unary { op, operand } => {
                 let inner = self.check_expr(operand);
                 match op {
                     UnaryOperator::AddressOf => {
                         // 1. 获取操作数的可变性
-                        // 注意：此时 operand 已经被 check_expr 递归处理过，
-                        // 所以 Path Resolution 和 Type Info 都已经就绪。
                         let mutability = self.get_expr_mutability(operand);
                         
                         // 2. 生成对应的指针类型
@@ -1025,7 +1014,7 @@ impl Analyzer {
                         if let TypeKey::Pointer(base, _) = inner { *base } 
                         else { self.error("Cannot deref non-pointer", expr.span); TypeKey::Error }
                     }
-                    // 补全：取负
+                    // 取负
                     UnaryOperator::Negate => {
                         let is_valid = match &inner {
                             // 1. 基础类型：必须是数值
@@ -1047,16 +1036,15 @@ impl Analyzer {
                             );
                             TypeKey::Error
                         } else {
-                            // 【严格检查】禁止对无符号整数取负
-                            // 例如：set u: u8 = 10; set x = -u; // Error!
+                            // 禁止对无符号整数取负
+                            // e.g., set u: u8 = 10; set x = -u; // Error!
                             if let TypeKey::Primitive(p) = &inner {
                                 if !self.is_signed_numeric(p) {
                                     self.error(
                                         format!("Cannot negate unsigned integer type {:?}", p), 
                                         expr.span
                                     );
-                                    // 报错后返回 Error 防止后续产生更多噪音，或者返回 inner 继续检查
-                                    // 这里返回 inner 不影响后续逻辑结构
+                                    // 报错后返回 inner 继续检查
                                 }
                             }
                             
@@ -1076,18 +1064,17 @@ impl Analyzer {
                 // 1. 解析目标类型 (T)
                 let target_ty = self.resolve_ast_type(target_type);
 
-                // 2. 【关键修复】递归检查源表达式 (val)
+                // 2. 递归检查源表达式 (val)
                 // 这会触发 Path 解析，填充 path_resolutions 和 types 表
                 let src_ty = self.check_expr(src_expr);
 
-                // 3. (可选) 检查 Cast 是否合法
-                // 例如：禁止 Struct 转 Int，或者做一些基础检查
-                // 目前为了跑通，我们先假设用户是对的 (Trust the programmer for now)
+                //? TODO: 3. 检查 Cast 是否合法
+                //? e.g.,禁止 Struct 转 Int，或者做一些基础检查
                 
-                // 4. (可选优化) 固化字面量
-                // 如果是 10 as u8，我们可以顺手把 10 固化为 u8，减少 Codegen 的 cast 指令
-                // 但 LLVM 优化器也会做这件事，所以这步不是必须的。
-                // self.coerce_literal_type(src_expr.id, &target_ty, &src_ty);
+                //? TODO: 4. 固化字面量(优化)
+                //? 如果是 10 as u8，我们可以顺手把 10 固化为 u8，减少 Codegen 的 cast 指令
+                //? 但 LLVM 优化器也会做这件事?
+                //? self.coerce_literal_type(src_expr.id, &target_ty, &src_ty);
 
                 // Cast 表达式的类型就是目标类型
                 target_ty
@@ -1101,7 +1088,7 @@ impl Analyzer {
     /// ==================================================
     /// 辅助函数
     /// ==================================================
-    // 检查表达式是否可以被赋值 (Is it a mutable L-Value?)
+    // 检查表达式是否可以被赋值 
     fn check_lvalue_mutability(&mut self, expr: &Expression) {
         match &expr.kind {
             // Case 1: 变量 (Path)
@@ -1118,8 +1105,8 @@ impl Analyzer {
                             );
                         }
                     } else {
-                        // 可能是全局变量或者 Module？如果没记录 mutability，默认不可变
-                        // 或者这是一个 bug
+                        //? 可能是全局变量或者 Module？如果没记录 mutability，默认不可变
+                        //? 或者这是一个 bug?
                     }
                 }
             }
@@ -1144,7 +1131,7 @@ impl Analyzer {
                         // OK: *T 允许修改内容
                     }
                     _ => {
-                        // check_expr 应该已经报错 "Not a pointer" 了
+                        //? check_expr 应该已经报错 "Not a pointer" 了
                     }
                 }
             }
@@ -1169,7 +1156,7 @@ impl Analyzer {
             // 1. 变量：查表看定义时是不是 mut
             ExpressionKind::Path(path) => {
                 if let Some(&def_id) = self.ctx.path_resolutions.get(&path.id) {
-                    // 如果表里没记录（比如全局变量暂未处理），默认不可变，安全第一
+                    // 如果表里没记录（比如全局变量暂未处理），默认不可变
                     *self.ctx.mutabilities.get(&def_id).unwrap_or(&Mutability::Immutable)
                 } else {
                     Mutability::Immutable
@@ -1187,7 +1174,6 @@ impl Analyzer {
             }
 
             // 4. 解引用 (ptr^)：取决于 ptr 本身是指向可变还是不可变
-            // 注意：这里逻辑有点绕。
             // 如果 ptr 是 *T (Mutable Pointer)，那么 ptr^ 是可变的。
             // 如果 ptr 是 ^T (Const Pointer)，那么 ptr^ 是不可变的。
             ExpressionKind::Unary { op: UnaryOperator::Dereference, operand } => {
@@ -1226,8 +1212,8 @@ impl Analyzer {
     }
 
     // 辅助：类型强转回写
-    // 当我们发现一个“未定类型的字面量”成功匹配了一个“具体类型”时，
-    // 我们把这个具体类型更新到 AST 节点的类型表中，供 Codegen 使用。
+    // 当发现一个“未定类型的字面量”成功匹配了一个“具体类型”时，
+    // 把这个具体类型更新到 AST 节点的类型表中，供 Codegen 使用。
     fn coerce_literal_type(&mut self, node_id: NodeId, expected: &TypeKey, actual: &TypeKey) {
         match actual {
             TypeKey::IntegerLiteral(_) | TypeKey::FloatLiteral(_) => {
@@ -1332,7 +1318,7 @@ impl Analyzer {
     }
 
     // 辅助：从 AST 类型中提取用于修饰名字的基础名称
-    // 例如：Type(Path(Vector)) -> "Vector"
+    // e.g., Type(Path(Vector)) -> "Vector"
     //      Type(Pointer(Vector)) -> "Vector"
     fn get_mangling_type_name(&self, ty: &Type) -> String {
         match &ty.kind {
@@ -1341,7 +1327,7 @@ impl Analyzer {
                 path.segments.last().unwrap().name.clone()
             },
             TypeKind::Pointer { inner, .. } => self.get_mangling_type_name(inner),
-            TypeKind::Array { inner, .. } => format!("Arr_{}", self.get_mangling_type_name(inner)), // 简单处理
+            TypeKind::Array { inner, .. } => format!("Arr_{}", self.get_mangling_type_name(inner)), //? 更“安全”的处理方式？
             TypeKind::Primitive(p) => format!("{:?}", p), // e.g. "I32"
             _ => "Unknown".to_string(),
         }
@@ -1398,8 +1384,8 @@ impl Analyzer {
                 // 获取 Cast 表达式的目标类型 (check_expr 已经计算并记录了)
                 if let Some(target_key) = self.ctx.types.get(&expr.id) {
                     match target_key {
-                        // 1. 如果目标是整数，模拟位宽截断 (Truncate)
-                        // 这对于计算掩码很重要 (e.g. val & 0xFF)
+                        // 1. 如果目标是整数，模拟位宽截断truncate
+                        // 用于计算掩码(e.g. val & 0xFF)
                         TypeKey::Primitive(p) => {
                             match p {
                                 PrimitiveType::U8 | PrimitiveType::I8 => Some(val & 0xFF),
@@ -1413,15 +1399,17 @@ impl Analyzer {
                         TypeKey::Pointer(..) => Some(val),
                         
                         // 其他情况 (如转 Float)，暂不支持常量求值
+                        //? 更完善的consexpr机制？
                         _ => Some(val) 
                     }
                 } else {
-                    // 理论上 check_expr 应该已经填好类型了，防守性策略：直接返回
+                    // 理论上 check_expr 应该已经填好类型了，直接返回
                     Some(val)
                 }
             },
 
             // 其他情况（函数调用等）不是常量
+            //? 更完善的constexpr?
             _ => None,
         }
     }
