@@ -1,7 +1,7 @@
-# Nine Lang (9-lang) 🚀
+# Nine Lang (9-lang)
 
-![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
-![License](https://img.shields.io/badge/license-MIT-blue)
+![Build Status](https://img.shields.io/github/actions/workflow/status/Karesis/lice/rust.yml?branch=main)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Version](https://img.shields.io/badge/version-0.1.0--alpha-orange)
 
 **Nine Lang** is a modern, statically-typed systems programming language focusing on simplicity, explicit semantics, and module-based organization. Built with Rust and LLVM.
