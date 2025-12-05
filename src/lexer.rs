@@ -73,6 +73,7 @@ impl<'a> Lexer<'a> {
             '&' => self.make_token(TokenKind::Ampersand), // AddrOf
             '|' => self.make_token(TokenKind::Pipe),  // Switch pattern
             '@' => self.make_token(TokenKind::At),
+            '#' => self.make_token(TokenKind::Hash),
 
             // 需要向前看的符号
             '.' => {

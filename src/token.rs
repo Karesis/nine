@@ -120,6 +120,7 @@ define_tokens! {
         "typedef"   => Typedef,
         "typealias" => Typealias,
         "extern" => Extern,
+        "cap" => Cap,
 
         // 流程控制
         "if"       => If,
@@ -177,5 +178,6 @@ define_tokens! {
         "|"  => Pipe,        // 用于 switch case 模式多选
         "..." => DotDotDot, // ...
         "@" => At,
+        "#" => Hash,
     }
 }

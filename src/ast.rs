@@ -25,11 +25,39 @@ pub struct Identifier {
     pub span: Span,
 }
 
-/// 路径 (例如: std::io::File)
+/// 泛型参数 <T: Cap + Cap>
+#[derive(Debug, Clone)]
+pub struct GenericParam {
+    pub id: NodeId,
+    pub name: Identifier, // "T"
+    pub constraints: Vec<Path>, // ["Printable", "Clone"]
+    pub span: Span,
+}
+
+/// 能力定义 (Interface/Trait)
+/// cap Printable { fn to_string(self) -> ^u8; }
+#[derive(Debug, Clone)]
+pub struct CapDefinition {
+    pub name: Identifier,
+    pub generics: Vec<GenericParam>,
+    pub methods: Vec<FunctionDefinition>, // 只有签名，body 为 None
+    pub is_pub: bool,
+    pub span: Span,
+}
+
+/// 路径片段 (e.g. Vector#<i32>)
+#[derive(Debug, Clone)]
+pub struct PathSegment {
+    pub name: String,
+    pub generic_args: Option<Vec<Type>>, // <--- 泛型实参
+    pub span: Span,
+}
+
+/// 路径
 #[derive(Debug, Clone)]
 pub struct Path {
     pub id: NodeId,
-    pub segments: Vec<Identifier>,
+    pub segments: Vec<PathSegment>, // <--- 修改：Identifier -> PathSegment
     pub span: Span,
 }
 
@@ -105,7 +133,7 @@ pub enum TypeKind {
         mutability: Mutability,
     },
 
-    /// 数组类型 [T; N] - EBNF: AtomType "[" INT "]"
+    /// 数组类型 T[N] - EBNF: AtomType "[" INT "]"
     Array {
         inner: Box<Type>,
         size: u64, // 编译时必须知晓大小
@@ -379,8 +407,12 @@ pub enum ItemKind {
     /// 函数定义
     FunctionDecl(FunctionDefinition),
 
+    CapDecl(CapDefinition),
+
     /// 实现块 imp for Type { ... }
     Implementation {
+        generics: Vec<GenericParam>, 
+        implements: Option<Path>,    
         target_type: Type,
         methods: Vec<FunctionDefinition>,
     },
@@ -404,6 +436,7 @@ pub struct GlobalDefinition {
 #[derive(Debug, Clone)]
 pub struct StructDefinition {
     pub name: Identifier,
+    pub generics: Vec<GenericParam>,
     pub fields: Vec<FieldDefinition>,
     /// 静态函数 (属于 struct 命名空间)
     /// 解析时：直接读取 Struct 内部的 fn
@@ -422,6 +455,7 @@ pub struct StructDefinition {
 #[derive(Debug, Clone)]
 pub struct EnumDefinition {
     pub name: Identifier,
+    pub generics: Vec<GenericParam>,
     /// 基础整数类型 (如 enum Color : u8)
     pub underlying_type: Option<PrimitiveType>,
 
@@ -455,6 +489,7 @@ pub struct EnumVariant {
 pub struct FunctionDefinition {
     pub id: NodeId,
     pub name: Identifier,
+    pub generics: Vec<GenericParam>,
     pub params: Vec<Parameter>,
     pub return_type: Option<Type>,
     // 修改 1: 允许没有函数体 (Option)

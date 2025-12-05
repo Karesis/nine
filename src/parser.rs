@@ -477,24 +477,46 @@ impl<'a> Parser<'a> {
 
     // === 辅助函数 ===
 
-    /// Path 解析：Ident { :: Ident }
+    /// Path 解析：Ident [Generics] { :: Ident [Generics] }
+    /// 修改后支持: List#<i32> 或 Map#<String, i32>::Entry
     pub fn parse_path(&mut self) -> ParseResult<Path> {
         let mut segments = Vec::new();
         let start_pos = self.peek().span.start;
 
-        // 第一个必然是 Ident
+        // 1. 第一个 Segment
         let first = self.expect(TokenKind::Identifier)?;
-        segments.push(Identifier {
+        let first_args = self.parse_generic_arguments()?; // <--- 插入点
+
+        let mut last_end = first.span.end;
+        // 如果有泛型参数，更新结束位置到 '>'
+        if let Some(ref args) = first_args {
+             if let Some(last_arg) = args.last() {
+                 // 这里其实应该取 '>' 的位置，但 Parser helper 里 generic args 已经吃掉了 '>'
+                 // 我们可以用 previous_span 获取 '>' 的位置
+                 last_end = self.previous_span().end; 
+             }
+        }
+
+        segments.push(PathSegment {
             name: self.text(first).to_string(),
-            span: first.span,
+            generic_args: first_args,
+            span: Span::new(first.span.start, last_end), // <--- 修改：Identifier -> PathSegment
         });
 
-        // 循环解析 :: Ident
+        // 2. 循环解析 :: Ident [Generics]
         while self.match_token(&[TokenKind::ColonColon]) {
             let seg = self.expect(TokenKind::Identifier)?;
-            segments.push(Identifier {
+            let seg_args = self.parse_generic_arguments()?; // <--- 插入点
+
+            let mut seg_end = seg.span.end;
+            if let Some(_) = seg_args {
+                 seg_end = self.previous_span().end;
+            }
+
+            segments.push(PathSegment {
                 name: self.text(seg).to_string(),
-                span: seg.span,
+                generic_args: seg_args,
+                span: Span::new(seg.span.start, seg_end),
             });
         }
 
@@ -504,6 +526,93 @@ impl<'a> Parser<'a> {
             segments,
             span: Span::new(start_pos, end_pos),
         })
+    }
+
+    // ==========================================
+    // 泛型解析辅助函数
+    // ==========================================
+
+    /// 解析泛型参数定义 (Definition Site)
+    /// 语法: "#" "<" GenericParam { "," GenericParam } ">"
+    /// 例如: #<T, U: Printable>
+    // src/parser.rs
+
+    fn parse_generic_params(&mut self) -> ParseResult<Vec<GenericParam>> {
+        if !self.check(TokenKind::Hash) { return Ok(Vec::new()); }
+        if !self.check_nth(1, TokenKind::Lt) { return Ok(Vec::new()); }
+
+        self.advance(); // #
+        self.expect(TokenKind::Lt)?; // <
+
+        let mut params = Vec::new();
+
+        while !self.check(TokenKind::Gt) && !self.is_at_end() {
+            let name_tok = self.expect(TokenKind::Identifier)?;
+            let name = Identifier {
+                name: self.text(name_tok).to_string(),
+                span: name_tok.span,
+            };
+
+            // 解析约束: T: Cap + std::path::Path
+            let mut constraints = Vec::new();
+            if self.match_token(&[TokenKind::Colon]) {
+                loop {
+                    // 【核心修改】调用 parse_path，支持 List#<i32> 或 std::io::Read
+                    let cap_path = self.parse_path()?;
+                    constraints.push(cap_path);
+
+                    if !self.match_token(&[TokenKind::Plus]) {
+                        break;
+                    }
+                }
+            }
+
+            // 计算 span (逻辑不变)
+            let span = if let Some(last_cap) = constraints.last() {
+                Span::new(name.span.start, last_cap.span.end)
+            } else {
+                name.span
+            };
+
+            params.push(GenericParam {
+                id: self.next_id(),
+                name,
+                constraints,
+                span,
+            });
+
+            if !self.match_token(&[TokenKind::Comma]) {
+                break;
+            }
+        }
+
+        self.expect(TokenKind::Gt)?; // >
+        Ok(params)
+    }
+
+    /// 解析泛型实参 (Call Site / Type Usage)
+    /// 语法: "#" "<" Type { "," Type } ">"
+    /// 例如: #<i32, String>
+    fn parse_generic_arguments(&mut self) -> ParseResult<Option<Vec<Type>>> {
+        // 同样检查 #<
+        if !self.check(TokenKind::Hash) || !self.check_nth(1, TokenKind::Lt) {
+            return Ok(None);
+        }
+
+        self.advance(); // '#'
+        self.expect(TokenKind::Lt)?; // '<'
+
+        let mut args = Vec::new();
+        while !self.check(TokenKind::Gt) && !self.is_at_end() {
+            args.push(self.parse_type()?);
+
+            if !self.match_token(&[TokenKind::Comma]) {
+                break;
+            }
+        }
+
+        self.expect(TokenKind::Gt)?; // '>'
+        Ok(Some(args))
     }
 
     /// 将 TokenKind 转换为 PrimitiveType 枚举
@@ -938,6 +1047,7 @@ impl<'a> Parser<'a> {
             }
 
             //  self 作为表达式
+            //  self 作为表达式
             TokenKind::SelfVal => {
                 let tok = self.advance();
                 Ok(Expression {
@@ -945,8 +1055,9 @@ impl<'a> Parser<'a> {
                     // 将 self 视为名为 "self" 的 Path
                     kind: ExpressionKind::Path(Path {
                         id: self.next_id(),
-                        segments: vec![Identifier {
+                        segments: vec![PathSegment { // <--- 修改：构造 PathSegment
                             name: "self".to_string(),
+                            generic_args: None, // self 本身通常不带泛型参数
                             span: tok.span,
                         }],
                         span: tok.span,
@@ -1589,6 +1700,7 @@ impl<'a> Parser<'a> {
                 }
                 self.parse_imp_decl(start_span.start)
             }
+            TokenKind::Cap => self.parse_cap_decl(is_pub, start_span.start),
 
             _ => Err(ParseError {
                 expected: "Top level declaration".into(),
@@ -1768,7 +1880,6 @@ impl<'a> Parser<'a> {
 
     // 公共逻辑：解析类似 Struct 的定义
     // 负责解析: Keyword [Alignment] Identifier "{" { Members } "}"
-    // 负责解析: Keyword [Alignment] Identifier "{" ... "}"
     fn parse_record_definition(
         &mut self,
         keyword: TokenKind,
@@ -1780,9 +1891,11 @@ impl<'a> Parser<'a> {
         // 1. Header 部分
         let alignment = self.parse_optional_alignment()?;
         let name = self.parse_identifier()?;
+        
+        // <--- 插入点：解析泛型参数 definition --->
+        let generics = self.parse_generic_params()?; 
 
         // 2. Body 部分 (使用通用解析器)
-        // 闭包负责解析: Identifier ":" Type ";"
         let (fields, static_methods, body_span) = self.parse_mixed_body(|p| {
             let field_name = p.parse_identifier()?;
             p.expect(TokenKind::Colon)?;
@@ -1798,6 +1911,7 @@ impl<'a> Parser<'a> {
 
         Ok(StructDefinition {
             name,
+            generics, // <--- 存入
             fields,
             static_methods,
             alignment,
@@ -1846,10 +1960,13 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // EnumDecl -> "enum" Identifier [ ":" IntType ] "{" { EnumMember } "}"
+    // EnumDecl -> "enum" Identifier [Generics] [ ":" IntType ] "{" { EnumMember } "}"
     fn parse_enum_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Enum)?;
         let name = self.parse_identifier()?;
+
+        // <--- 修改点：这里插入泛型解析 --->
+        let generics = self.parse_generic_params()?;
 
         // 1. Header 部分: [ ":" IntType ]
         let mut underlying_type = None;
@@ -1868,7 +1985,6 @@ impl<'a> Parser<'a> {
         }
 
         // 2. Body 部分 (使用通用解析器)
-        // 闭包负责解析: Identifier [ "=" INT ] ";"
         let (variants, static_methods, body_span) = self.parse_mixed_body(|p| {
             let v_name = p.parse_identifier()?;
             let mut value = None;
@@ -1889,6 +2005,7 @@ impl<'a> Parser<'a> {
             id: self.next_id(),
             kind: ItemKind::EnumDecl(EnumDefinition {
                 name,
+                generics, // <--- 记得存入 AST (需确保 AST 结构体里有这个字段)
                 underlying_type,
                 variants,
                 static_methods,
@@ -1899,9 +2016,51 @@ impl<'a> Parser<'a> {
         })
     }
 
+    // CapDecl -> "cap" Identifier "{" { MethodDecl } "}"
+    fn parse_cap_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
+        self.expect(TokenKind::Cap)?;
+        let name = self.parse_identifier()?;
+
+        let generics = self.parse_generic_params()?;
+
+        self.expect(TokenKind::LBrace)?;
+
+        let mut methods = Vec::new();
+        while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+            
+            let is_method_pub = self.match_token(&[TokenKind::Pub]);
+            let fn_start = if is_method_pub { self.previous_span().start } else { self.peek().span.start };
+            
+            methods.push(self.parse_function_definition(
+                is_method_pub,
+                false, // is_extern
+                fn_start,
+                None, // cap 定义时不涉及 self 的具体类型
+            )?);
+        }
+
+        let end = self.expect(TokenKind::RBrace)?.span.end;
+
+        Ok(Item {
+            id: self.next_id(),
+            kind: ItemKind::CapDecl(CapDefinition {
+                name,
+                generics,
+                methods,
+                is_pub,
+                span: Span::new(start, end),
+            }),
+            span: Span::new(start, end),
+        })
+    }
+
     // TypeImpDecl -> "imp" "for" Type "{" { MethodDecl } "}"
     fn parse_imp_decl(&mut self, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Imp)?;
+        
+        // <--- 插入点：解析 imp 自身的泛型参数 (imp#<T> for ...) --->
+        let generics = self.parse_generic_params()?;
+
         self.expect(TokenKind::For)?;
 
         // 1. 解析目标类型 (此时拥有所有权)
@@ -1912,11 +2071,8 @@ impl<'a> Parser<'a> {
         let mut methods = Vec::new();
         while !self.check(TokenKind::RBrace) && !self.is_at_end() {
             let is_pub = self.match_token(&[TokenKind::Pub]);
-            let fn_start = if is_pub {
-                self.previous_span().start
-            } else {
-                self.peek().span.start
-            };
+            let fn_start = if is_pub { self.previous_span().start } else { self.peek().span.start };
+            
             methods.push(self.parse_function_definition(
                 is_pub,
                 false,
@@ -1929,8 +2085,9 @@ impl<'a> Parser<'a> {
 
         Ok(Item {
             id: self.next_id(),
-            // 3. 最后这里 move target_type
             kind: ItemKind::Implementation {
+                generics, // <--- 存入
+                implements: None, // 目前没有 Trait/Cap 实现，只是 imp for Type
                 target_type,
                 methods,
             },
@@ -1990,17 +2147,20 @@ impl<'a> Parser<'a> {
     fn parse_function_definition(
         &mut self,
         is_pub: bool,
-        is_extern: bool, // <--- 【新增参数】
+        is_extern: bool,
         start: usize,
         ctx_type: Option<&Type>,
     ) -> ParseResult<FunctionDefinition> {
         self.expect(TokenKind::Fn)?;
         let name = self.parse_identifier()?;
 
+        // <--- 插入点：解析泛型参数 definition (fn foo#<T>(...)) --->
+        let generics = self.parse_generic_params()?;
+
         self.expect(TokenKind::LParen)?;
 
+        // ... 后面的逻辑保持不变 ...
         let (params, is_variadic) = self.parse_param_list(ctx_type)?;
-
         self.expect(TokenKind::RParen)?;
 
         let mut return_type = None;
@@ -2008,33 +2168,31 @@ impl<'a> Parser<'a> {
             return_type = Some(self.parse_type()?);
         }
 
-        // 修改：解析 Body (Block) 或者 声明 (Semi)
         let (body, end_pos) = if self.check(TokenKind::LBrace) {
-            // 情况 A: 有函数体 fn foo() { ... }
             let block = self.parse_block()?;
             let end = block.span.end;
             (Some(block), end)
         } else if self.match_token(&[TokenKind::Semi]) {
-            // 情况 B: 外部声明 fn foo();
             (None, self.previous_span().end)
         } else {
             return Err(ParseError {
                 expected: "{ or ;".into(),
                 found: self.peek().kind,
                 span: self.peek().span,
-                message: "Expected function body or semicolon for declaration".into(),
+                message: "Expected function body or semicolon".into(),
             });
         };
 
         Ok(FunctionDefinition {
             id: self.next_id(),
             name,
+            generics, // <--- 存入
             params,
             return_type,
             body,
             is_variadic,
             is_pub,
-            is_extern, // <--- 【存入 AST】
+            is_extern,
             span: Span::new(start, end_pos),
         })
     }
