@@ -546,7 +546,7 @@ impl<'a> Parser<'a> {
 
         let mut params = Vec::new();
 
-        while !self.check(TokenKind::Gt) && !self.is_at_end() {
+        while !self.check(TokenKind::Gt) && !self.check(TokenKind::Shr) && !self.is_at_end() {
             let name_tok = self.expect(TokenKind::Identifier)?;
             let name = Identifier {
                 name: self.text(name_tok).to_string(),
@@ -586,7 +586,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        self.expect(TokenKind::Gt)?; // >
+        self.consume_generic_closer()?;
         Ok(params)
     }
 
@@ -603,7 +603,9 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::Lt)?; // '<'
 
         let mut args = Vec::new();
-        while !self.check(TokenKind::Gt) && !self.is_at_end() {
+        
+        // 循环条件：增加 && !self.check(TokenKind::Shr)
+        while !self.check(TokenKind::Gt) && !self.check(TokenKind::Shr) && !self.is_at_end() {
             args.push(self.parse_type()?);
 
             if !self.match_token(&[TokenKind::Comma]) {
@@ -611,8 +613,59 @@ impl<'a> Parser<'a> {
             }
         }
 
-        self.expect(TokenKind::Gt)?; // '>'
+        // 【修改 2】使用新函数来结束泛型实参列表
+        self.consume_generic_closer()?; 
+        
         Ok(Some(args))
+    }
+
+    /// 专门用于消耗泛型结束符 '>'
+    /// 如果遇到 '>>' (Shr)，会将其拆分为两个 '>'，消耗一个，把另一个塞回流中
+    fn consume_generic_closer(&mut self) -> ParseResult<Token> {
+        // 情况 1: 刚好是 '>'
+        if self.check(TokenKind::Gt) {
+            return self.advance_with_check();
+        }
+
+        // 情况 2: 是 '>>' (Shr)
+        if self.check(TokenKind::Shr) {
+            // 1. 消耗当前的 Shr Token
+            // 注意：我们要手动修改它，所以先拿到它
+            let mut token = self.advance_with_check()?;
+
+            // 2. 把当前这个 Token "变性" 为 Gt
+            token.kind = TokenKind::Gt;
+            // 修改 span: 比如原来是 10..12 (长度2)，现在变成 10..11 (长度1)
+            let original_end = token.span.end;
+            token.span.end -= 1; 
+
+            // 3. 凭空制造第二个 Gt Token
+            let second_gt = Token {
+                kind: TokenKind::Gt,
+                span: Span::new(token.span.end, original_end), // 11..12
+            };
+
+            // 4. 【魔法】把第二个 Gt 塞回 TokenStream 的缓冲区头部
+            // 这样下一次 peek/advance 就会看到这个新的 Gt
+            self.stream.buffer.push_front(second_gt);
+            
+            // 修正 Parser 记录的 previous_kind，防止 synchronize 误判
+            self.previous_kind = TokenKind::Gt;
+
+            return Ok(token);
+        }
+        
+        // 还可以支持 '>>>' 或 '>=' 等，如果需要的话
+        // 目前只处理 >> 即可
+
+        // 如果都不是，报错
+        self.expect(TokenKind::Gt)
+    }
+    
+    // 辅助：把 self.advance() 稍微包装一下以配合上面的 Result 返回值签名
+    // (你原来的 advance 返回 Token，expect 返回 Result<Token>)
+    fn advance_with_check(&mut self) -> ParseResult<Token> {
+        Ok(self.advance())
     }
 
     /// 将 TokenKind 转换为 PrimitiveType 枚举

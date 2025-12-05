@@ -1069,25 +1069,18 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 // 1. 获取 Receiver 的具体类型 (e.g., Box<i32>)
                 let receiver_ty_key = self.get_resolved_type(receiver.id);
 
-                // === 2. 查找方法定义 (修复点：模糊查找) ===
-                // method_registry 的 Key 是定义时的类型 (Pair<T>)，而我们手里的是 Pair<i32>
-                // 所以不能直接 get，必须遍历寻找 DefId 匹配的条目
-                
+                // 2. 查找方法 (使用 AnalysisContext 里的 helper)
                 let mut found_methods = None;
 
-                // A. 先尝试直接查找 (针对非泛型普通类型)
                 if let Some(methods) = self.analysis.method_registry.get(&receiver_ty_key) {
                     found_methods = Some(methods);
-                } 
-                // B. 如果找不到且是泛型实例，尝试匹配 DefId
-                else if let TypeKey::Instantiated { def_id, .. } = &receiver_ty_key {
+                } else {
+                    // 模糊查找
                     for (key, methods) in &self.analysis.method_registry {
-                        if let TypeKey::Instantiated { def_id: k_id, .. } = key {
-                            // 只要 DefId (结构体ID) 相同，说明就是这个结构体的方法表
-                            if k_id == def_id {
-                                found_methods = Some(methods);
-                                break;
-                            }
+                        // 调用 analysis 的 helper
+                        if self.analysis.are_types_compatible(&receiver_ty_key, key) {
+                            found_methods = Some(methods);
+                            break;
                         }
                     }
                 }

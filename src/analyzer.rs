@@ -330,6 +330,35 @@ impl AnalysisContext {
             format!("{}_{}", base_name, args_str.join("_"))
         }
     }
+
+    // 检查两个类型是否兼容（用于泛型模糊查找）
+    // concrete: 实际类型 (e.g. *List<i32>)
+    // template: 注册表里的类型 (e.g. *List<T>)
+    pub fn are_types_compatible(&self, concrete: &TypeKey, template: &TypeKey) -> bool {
+        match (concrete, template) {
+            // 1. 基础情况：完全相等
+            (a, b) if a == b => true,
+
+            // 2. 核心情况：Instantiated vs Instantiated
+            // 只要 DefId 相同，我们就认为兼容（参数不同没关系，因为一个是i32，一个是T）
+            (TypeKey::Instantiated { def_id: a, .. }, TypeKey::Instantiated { def_id: b, .. }) => {
+                a == b
+            },
+
+            // 3. 递归情况：指针 vs 指针
+            // 比如 *List<i32> vs *List<T>
+            (TypeKey::Pointer(inner_a, mut_a), TypeKey::Pointer(inner_b, mut_b)) => {
+                mut_a == mut_b && self.are_types_compatible(inner_a, inner_b)
+            },
+
+            // 4. 递归情况：数组
+            (TypeKey::Array(inner_a, size_a), TypeKey::Array(inner_b, size_b)) => {
+                size_a == size_b && self.are_types_compatible(inner_a, inner_b)
+            },
+
+            _ => false,
+        }
+    }
 }
 /// ======================================================
 /// 3. Analyzer 主逻辑
@@ -1679,9 +1708,7 @@ impl Analyzer {
                 // 3. 提取并记录泛型参数
                 // 此时我们已经有了 method_info，可以安全地记录单态化需求了
                 let mut combined_args = Vec::new();
-                if let TypeKey::Instantiated { args, .. } = &receiver_type {
-                    combined_args.extend(args.clone());
-                }
+                combined_args.extend(self.extract_generic_args(&receiver_type));
 
                 if !combined_args.is_empty() {
                     // A. 记录到节点表 (Codegen 生成名字用)
@@ -1996,24 +2023,19 @@ impl Analyzer {
 
     /// 在方法注册表中查找方法 (支持泛型实例的模糊查找)
     fn find_method_in_registry(&self, receiver_type: &TypeKey, method_name: &str) -> Option<MethodInfo> {
-        // 1. 尝试精确匹配 (针对非泛型类型)
+        // 1. 尝试精确匹配
         if let Some(methods) = self.ctx.method_registry.get(receiver_type) {
             if let Some(info) = methods.get(method_name) {
                 return Some(info.clone());
             }
         }
 
-        // 2. 尝试泛型定义模糊匹配 (Fuzzy Match)
-        // receiver 是 Pair<i32>，registry 里存的是 Pair<T>
-        if let TypeKey::Instantiated { def_id, .. } = receiver_type {
-            for (key, methods) in &self.ctx.method_registry {
-                if let TypeKey::Instantiated { def_id: k_id, .. } = key {
-                    // 只要 DefId (结构体ID) 相同，说明是同一个泛型模板
-                    if k_id == def_id {
-                        if let Some(info) = methods.get(method_name) {
-                            return Some(info.clone());
-                        }
-                    }
+        // 2. 尝试泛型兼容匹配 (使用新函数)
+        for (key, methods) in &self.ctx.method_registry {
+            // 如果 receiver_type (具体) 兼容 key (模板)
+            if self.ctx.are_types_compatible(receiver_type, key) {
+                if let Some(info) = methods.get(method_name) {
+                    return Some(info.clone());
                 }
             }
         }
@@ -2814,6 +2836,16 @@ impl Analyzer {
             }
         }
         eprintln!("[DEBUG] ---------------------------");
+    }
+
+    // 辅助：从类型中提取泛型实参 (递归穿透指针)
+    fn extract_generic_args(&self, ty: &TypeKey) -> Vec<TypeKey> {
+        match ty {
+            TypeKey::Instantiated { args, .. } => args.clone(),
+            TypeKey::Pointer(inner, _) => self.extract_generic_args(inner),
+            TypeKey::Array(inner, _) => self.extract_generic_args(inner),
+            _ => Vec::new(),
+        }
     }
 
 }
