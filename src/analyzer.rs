@@ -133,8 +133,8 @@ pub struct AnalysisContext {
     pub mutabilities: HashMap<DefId, Mutability>,
     pub mangled_names: HashMap<DefId, String>,
     pub constants: HashMap<DefId, u64>,
-    // 专门用于布局计算：记录结构体字段的有序类型
-    pub struct_definitions: HashMap<DefId, Vec<TypeKey>>,
+    // 记录结构体定义时的原始字段
+    pub struct_definitions: HashMap<DefId, Vec<(String, TypeKey)>>,
     pub errors: Vec<AnalyzeError>,
     pub target: TargetMetrics,
     // Key: Struct DefId, Value: [T_id, U_id, ...]
@@ -153,6 +153,19 @@ pub struct AnalysisContext {
     // Key: (函数定义ID, 实参类型列表)
     // e.g. (foo_id, [i32])
     pub concrete_functions: HashSet<(DefId, Vec<TypeKey>)>,
+    // Key: Mangled Name (唯一标识，如 "Box_i32")
+    // Value: 具体的、已替换的字段列表 [(fieldName, ConcreteType)]
+    pub instantiated_structs: HashMap<String, Vec<(String, TypeKey)>>,
+
+    // 收集所有非泛型函数的 ID
+    // 包含：普通 fn, struct 的非泛型 static method, impl 的非泛型 method
+    pub non_generic_functions: HashSet<DefId>,
+
+    // AST 节点对应的泛型实参列表
+    // Key: 表达式 ID (Expression::Path 或 MethodCall 的 ID)
+    // Value: 该调用使用的具体泛型实参列表 (e.g. [i32])
+    // 对于 impl<T> Struct<T> 的方法调用，这里存的就是 T 的具体类型
+    pub node_generic_args: HashMap<NodeId, Vec<TypeKey>>,
 }
 
 impl AnalysisContext {
@@ -173,6 +186,9 @@ impl AnalysisContext {
             generic_constraints: HashMap::new(),
             concrete_structs: HashSet::new(),
             concrete_functions: HashSet::new(),
+            instantiated_structs: HashMap::new(),
+            non_generic_functions: HashSet::new(),
+            node_generic_args: HashMap::new(),   
             target,
         }
     }
@@ -184,6 +200,137 @@ pub struct AnalyzeError {
     pub span: Span,
 }
 
+impl AnalysisContext {
+    /// 泛型替换：将类型中的泛型参数 (T) 替换为具体的实参 (args)
+    /// generic_def_id: 定义泛型的结构体/函数的 ID (用于查找 T 是第几个参数)
+    /// args: 具体的实参列表 (如 [i32])
+    pub fn substitute_generics(&self, ty: &TypeKey, generic_def_id: DefId, args: &[TypeKey]) -> TypeKey {
+        match ty {
+            // 1. 遇到泛型参数 T
+            TypeKey::GenericParam(param_id) => {
+                // 查表：这个 param_id 是 generic_def_id 的第几个参数？
+                if let Some(param_list) = self.def_generic_params.get(&generic_def_id) {
+                    if let Some(index) = param_list.iter().position(|id| id == param_id) {
+                        // 找到了！T 是第 index 个参数
+                        if let Some(arg_ty) = args.get(index) {
+                            return arg_ty.clone(); // 替换为 i32
+                        }
+                    }
+                }
+                // 没找到或者越界？返回原样 (理论上不应发生，除非编译器 Bug)
+                ty.clone() 
+            }
+
+            // 2. 递归替换内部类型
+            TypeKey::Pointer(inner, mutability) => {
+                let new_inner = self.substitute_generics(inner, generic_def_id, args);
+                TypeKey::Pointer(Box::new(new_inner), *mutability)
+            }
+            
+            TypeKey::Array(inner, size) => {
+                let new_inner = self.substitute_generics(inner, generic_def_id, args);
+                TypeKey::Array(Box::new(new_inner), *size)
+            }
+
+            // 3. 处理嵌套泛型实例: List<T> -> List<i32>
+            TypeKey::Instantiated { def_id, args: inner_args } => {
+                let new_args = inner_args.iter()
+                    .map(|a| self.substitute_generics(a, generic_def_id, args))
+                    .collect();
+                TypeKey::Instantiated { def_id: *def_id, args: new_args }
+            }
+
+            // 4. 函数指针
+            TypeKey::Function { params, ret, is_variadic } => {
+                let new_params = params.iter()
+                    .map(|p| self.substitute_generics(p, generic_def_id, args))
+                    .collect();
+                let new_ret = ret.as_ref()
+                    .map(|r| Box::new(self.substitute_generics(r, generic_def_id, args)));
+                
+                TypeKey::Function { params: new_params, ret: new_ret, is_variadic: *is_variadic }
+            }
+
+            // 基础类型不变
+            _ => ty.clone(),
+        }
+    }
+
+    // 根据语义类型生成修饰名 (用于 Codegen)
+    // e.g. List<i32> -> "std_collections_List_i32"
+    pub fn get_mangling_type_name(&self, ty: &TypeKey) -> String {
+        match ty {
+            // 基础类型直接转字符串
+            TypeKey::Primitive(p) => format!("{:?}", p), 
+
+            // 实例化的类型 (List<i32>)
+            TypeKey::Instantiated { def_id, args } => {
+                // 1. 查表获取基础名字 (e.g. "std_collections_List")
+                // 我们在 scan_declarations 阶段已经填好了 mangled_names
+                let base_name = self.mangled_names.get(def_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        // 理论上只要 scan_decl 跑过，这里一定有值
+                        // 除非是匿名类型或其他边缘情况
+                        format!("Struct_{}", def_id.0) 
+                    });
+
+                if args.is_empty() {
+                    base_name
+                } else {
+                    // 2. 递归拼接泛型参数
+                    // List<i32, f64> -> List_I32_F64
+                    let args_str: Vec<String> = args.iter()
+                        .map(|arg| self.get_mangling_type_name(arg))
+                        .collect();
+                    format!("{}_{}", base_name, args_str.join("_"))
+                }
+            }
+
+            // 指针类型
+            TypeKey::Pointer(inner, _) => format!("Ptr_{}", self.get_mangling_type_name(inner)),
+            
+            // 数组类型
+            TypeKey::Array(inner, size) => format!("Arr_{}_{}", size, self.get_mangling_type_name(inner)),
+
+            // 函数指针 (稍微复杂点，把参数全拼起来)
+            TypeKey::Function { params, ret, .. } => {
+                let params_str: Vec<String> = params.iter()
+                    .map(|p| self.get_mangling_type_name(p))
+                    .collect();
+                let ret_str = if let Some(r) = ret {
+                    self.get_mangling_type_name(r)
+                } else {
+                    "Unit".to_string()
+                };
+                format!("Fn_{}_Ret_{}", params_str.join("_"), ret_str)
+            }
+
+            // 泛型参数本身 (T)
+            // 在实例化后应该都被替换了，如果这里还能遇到 T，说明是在生成泛型模板本身的签名？
+            // 或者用于调试。
+            TypeKey::GenericParam(id) => format!("GenParam_{}", id.0),
+
+            _ => "Unknown".to_string(),
+        }
+    }
+
+    // 统一生成泛型函数的修饰名
+    pub fn get_mangled_function_name(&self, def_id: DefId, args: &[TypeKey]) -> String {
+        let base_name = self.mangled_names.get(&def_id)
+            .cloned()
+            .unwrap_or_else(|| format!("Fn{}", def_id.0)); // Fallback
+
+        if args.is_empty() {
+            base_name
+        } else {
+            let args_str: Vec<String> = args.iter()
+                .map(|a| self.get_mangling_type_name(a))
+                .collect();
+            format!("{}_{}", base_name, args_str.join("_"))
+        }
+    }
+}
 /// ======================================================
 /// 3. Analyzer 主逻辑
 /// ======================================================
@@ -218,17 +365,21 @@ impl Analyzer {
     pub fn analyze_program(&mut self, program: &Program) {
         self.scopes.push(Scope::new(ScopeKind::Module));
 
-        // Pass 1: 声明扫描
+        // Pass 1: 声明扫描 (scan_declarations)
         self.scan_declarations(&program.items);
 
-        // Pass 2: 实现扫描
+        // Pass 2: 实现扫描 (scan_implementations)
         self.scan_implementations(&program.items);
 
-        // Pass 3: 签名解析
+        // Pass 3: 签名解析 (resolve_signatures)
         self.resolve_signatures(&program.items);
 
-        // Pass 4: 函数体检查
+        // Pass 4: 函数体检查 (check_bodies)
+        // 注意：concrete_structs 和 concrete_functions 是在 check_bodies 和 resolve_signatures 过程中收集的
         self.check_bodies(&program.items);
+
+        // Pass 5: 【新增】单态化终结
+        self.finalize_monomorphization();
     }
 
     /// ==================================================
@@ -299,6 +450,18 @@ impl Analyzer {
                     // 记录类型 (使用 helper)
                     self.record_type(item.id, TypeKey::non_generic(item.id));
                     
+                    // 1. 判断结构体本身是否是非泛型的
+                    let is_struct_concrete = def.generics.is_empty();
+
+                    // 2. 遍历静态方法，收集非泛型函数
+                    for method in &def.static_methods {
+                        // 只有当 结构体非泛型 且 方法非泛型 时，才加入列表
+                        if is_struct_concrete && method.generics.is_empty() {
+                            self.ctx.non_generic_functions.insert(method.id);
+                        }
+                    }
+
+                    // 注册符号 (保持原样)
                     self.register_static_methods(item.id, &def.static_methods);
                 }
 
@@ -312,6 +475,16 @@ impl Analyzer {
                     for param_id in param_ids { self.ctx.generic_param_defs.insert(param_id); }
 
                     self.record_type(item.id, TypeKey::non_generic(item.id));
+                    // 1. 判断枚举本身是否是非泛型的
+                    let is_enum_concrete = def.generics.is_empty();
+
+                    // 2. 遍历静态方法
+                    for method in &def.static_methods {
+                        if is_enum_concrete && method.generics.is_empty() {
+                            self.ctx.non_generic_functions.insert(method.id);
+                        }
+                    }
+
                     self.register_static_methods(item.id, &def.static_methods);
                 }
 
@@ -359,12 +532,21 @@ impl Analyzer {
                         self.ctx.generic_param_defs.insert(param_id);
                     }
 
+                    // 普通函数只看自己
+                    if def.generics.is_empty() {
+                        self.ctx.non_generic_functions.insert(def.id);
+                    }
+
                     let mangled = if def.is_extern {
                         def.name.name.clone()
                     } else {
                         self.generate_mangled_name(&def.name.name)
                     };
                     self.ctx.mangled_names.insert(def.id, mangled);
+                    // 如果是普通函数，加入名单
+                    if def.generics.is_empty() {
+                        self.ctx.non_generic_functions.insert(def.id);
+                    }
                 }
 
                 // --- 类型别名 ---
@@ -594,9 +776,18 @@ impl Analyzer {
                     // 4. 生成修饰名 (使用新的接受 &TypeKey 的版本)
                     // 此时 key 可能是 Instantiated { def_id: List, args: [GenericParam(T)] }
                     // 生成的名字可能是 "std_collections_List_GenParam_0" 之类的
-                    let type_name = self.get_mangling_type_name(&key);
+                    let type_name = self.ctx.get_mangling_type_name(&key);
+
+                    // 1. 判断 imp 块本身是否带泛型 (e.g. imp<T> for List<T>)
+                    // 如果 imp 带有泛型参数，里面的方法就不是“非泛型”的（需要实例化）
+                    // 注意：如果是 imp List<i32> (具体特化)，generics 是空的，里面的方法可以直接编译！
+                    let is_impl_concrete = generics.is_empty();
 
                     for method in methods {
+                        // 只有当 imp块非泛型 且 方法非泛型 时，才加入列表
+                        if is_impl_concrete && method.generics.is_empty() {
+                            self.ctx.non_generic_functions.insert(method.id);
+                        }
                         // 格式：StructName_MethodName
                         // generate_mangled_name 会自动加上模块前缀
                         let combined_name = format!("{}_{}", type_name, method.name.name);
@@ -668,11 +859,13 @@ impl Analyzer {
 
                     // 2. 解析字段 (此时字段类型可以使用 T)
                     let mut fields = HashMap::new();
-                    let mut field_order_list = Vec::new();
+                    let mut field_order_list: Vec<(String, TypeKey)> = Vec::new();
                     for field in &def.fields {
                         let ty = self.resolve_ast_type(&field.ty);
                         fields.insert(field.name.name.clone(), ty.clone());
-                        field_order_list.push(ty);
+                        
+                        // 存入 (Name, Type)
+                        field_order_list.push((field.name.name.clone(), ty));
                     }
                     self.ctx.struct_fields.insert(item.id, fields);
                     self.ctx.struct_definitions.insert(item.id, field_order_list);
@@ -1187,23 +1380,44 @@ impl Analyzer {
             },
 
             ExpressionKind::Path(path) => {
-                // 1. 解析路径
+                // 1. 解析路径，获取定义 ID
                 if let Some(def_id) = self.resolve_path(path) {
                     
-                    // 2. 获取该定义的类型
-                    if let Some(def_type) = self.get_type_of_def(def_id) {
-                        
-                        // 3. 【副作用】尝试收集泛型实例化信息
-                        // 如果它是个函数且带了泛型参数，这里会记录下来
-                        self.try_record_function_instantiation(def_id, path);
+                    // === 【新增逻辑开始】收集 AST 里的泛型实参 ===
+                    // 比如代码写了: foo#<i32>()
+                    // 我们要把 [i32] 解析出来，记在 expr.id 名下
+                    let mut call_generic_args = Vec::new();
+                    
+                    // 检查路径最后一段是否有 generic_args
+                    if let Some(last_seg) = path.segments.last() {
+                        if let Some(ast_args) = &last_seg.generic_args {
+                            for arg_ty in ast_args {
+                                // 解析 AST 类型为 Semantic TypeKey
+                                call_generic_args.push(self.resolve_ast_type(arg_ty));
+                            }
+                        }
+                    }
 
-                        // 4. 返回类型
+                    // 如果收集到了参数，或者目标是泛型定义（需要推导），存表
+                    // (目前暂只处理显式写出的参数)
+                    if !call_generic_args.is_empty() {
+                        self.ctx.node_generic_args.insert(expr.id, call_generic_args.clone());
+                    }
+                    
+                    // 顺便尝试收集单态化需求 (这一步是给 concrete_functions 用的)
+                    // 注意：这一步不影响 node_generic_args 的填写
+                    self.try_record_function_instantiation(def_id, path);
+                    // === 【新增逻辑结束】 ===
+
+                    // 2. 返回该定义的类型
+                    if let Some(def_type) = self.get_type_of_def(def_id) {
                         def_type
                     } else {
                         self.error("Symbol has no type", path.span);
                         TypeKey::Error
                     }
                 } else {
+                    // 路径解析失败
                     self.error(
                         format!(
                             "Undefined symbol: {:?}",
@@ -1330,7 +1544,7 @@ impl Analyzer {
                         if let Some(raw_ty) = raw_field_ty_opt {
                             // C. 【关键步骤】执行泛型替换！
                             // 如果 raw_ty 是 T，且 args 是 [i32]，则 expected_ty 变为 i32
-                            let expected_ty = self.substitute_generics(raw_ty, def_id, &type_args);
+                            let expected_ty = self.ctx.substitute_generics(raw_ty, def_id, &type_args);
 
                             // D. 检查类型匹配
                             self.check_type_match(&expected_ty, &actual_ty, init.value.span);
@@ -1366,7 +1580,7 @@ impl Analyzer {
                             
                             // obj 是 Box<i32> (args=[i32])，字段是 val: T
                             // 这里算出 val 的类型是 i32
-                            let actual_field_ty = self.substitute_generics(raw_field_ty, def_id, &args);
+                            let actual_field_ty = self.ctx.substitute_generics(raw_field_ty, def_id, &args);
                             
                             self.record_type(expr.id, actual_field_ty.clone());
                             actual_field_ty
@@ -1474,11 +1688,29 @@ impl Analyzer {
                 method_name,
                 arguments,
             } => {
+                // 1. 检查 Receiver 类型
                 let receiver_type = self.check_expr(receiver);
                 if let TypeKey::Error = receiver_type {
                     return TypeKey::Error;
                 }
 
+                // === 【新增逻辑开始】提取 Receiver 的泛型参数 ===
+                // 如果 receiver 是 Box<i32> (Instantiated)，那么 T 就是 i32
+                let mut combined_args = Vec::new();
+                
+                if let TypeKey::Instantiated { args, .. } = &receiver_type {
+                    combined_args.extend(args.clone());
+                }
+                
+                // (如果以后方法本身支持泛型 method#<U>，在这里继续 extend)
+
+                // 存入 node_generic_args 表，供 Codegen 直接查阅
+                if !combined_args.is_empty() {
+                    self.ctx.node_generic_args.insert(expr.id, combined_args.clone());
+                }
+                // === 【新增逻辑结束】 ===
+
+                // 2. 查找方法定义 (逻辑保持不变)
                 let method_info =
                     if let Some(methods) = self.ctx.method_registry.get(&receiver_type) {
                         methods.get(&method_name.name).cloned()
@@ -1487,21 +1719,39 @@ impl Analyzer {
                     };
 
                 if let Some(info) = method_info {
+                    // 3. 检查参数匹配 (逻辑保持不变)
                     if let Some(TypeKey::Function { params, ret, .. }) =
                         self.ctx.types.get(&info.def_id).cloned()
                     {
+                        // params[0] 是 self，跳过
                         let expected_args = if params.is_empty() { &[] } else { &params[1..] };
+                        
                         if expected_args.len() != arguments.len() {
-                            self.error(format!("Method argument count mismatch"), expr.span);
+                            self.error("Method argument count mismatch", expr.span);
                         }
+                        
                         for (arg_expr, param_ty) in arguments.iter().zip(expected_args.iter()) {
                             let arg_actual = self.check_expr(arg_expr);
-                            self.check_type_match(param_ty, &arg_actual, arg_expr.span);
-                            // 固化方法参数的字面量类型
-                            self.coerce_literal_type(arg_expr.id, param_ty, &arg_actual);
+                            
+                            // 如果 receiver_type 是实例化的，我们需要拿到它的 def_id 做替换上下文
+                            let expected_concrete_ty = if let TypeKey::Instantiated { def_id, .. } = receiver_type {
+                                self.ctx.substitute_generics(param_ty, def_id, combined_args.as_slice()) // 使用 as_slice()
+                            } else {
+                                param_ty.clone()
+                            };
+
+                            self.check_type_match(&expected_concrete_ty, &arg_actual, arg_expr.span);
+                            self.coerce_literal_type(arg_expr.id, &expected_concrete_ty, &arg_actual);
                         }
+
+                        // 4. 处理返回值
                         if let Some(r) = ret {
-                            *r
+                            // 同样，返回值里的 T 也要替换成 i32
+                            if let TypeKey::Instantiated { def_id, .. } = receiver_type {
+                                self.ctx.substitute_generics(&r, def_id, combined_args.as_slice())
+                            } else {
+                                *r
+                            }
                         } else {
                             TypeKey::Primitive(PrimitiveType::Unit)
                         }
@@ -1568,45 +1818,65 @@ impl Analyzer {
             }
 
             ExpressionKind::StaticAccess { target, member } => {
-                // 1. 检查 Target 类型
+                // 1. 检查 Target 类型 (e.g. Box<i32>)
                 let target_ty = self.check_expr(target);
 
-                let container_id = if let TypeKey::Instantiated { def_id, .. } = target_ty {
-                    def_id
+                // 解构，获取 def_id
+                let container_id = if let TypeKey::Instantiated { def_id, args } = &target_ty {
+                    
+                    // === 【新增逻辑开始】记录泛型实参 ===
+                    // 如果是 Box<i32>::new，这里的 args 就是 [i32]
+                    if !args.is_empty() {
+                        self.ctx.node_generic_args.insert(expr.id, args.clone());
+                    }
+                    // === 【新增逻辑结束】 ===
+                    
+                    *def_id
                 } else {
-                    self.error("Expected Struct/Enum...", target.span);
+                    self.error(
+                        format!("Expected Struct/Enum type for '::' access, found {:?}", target_ty),
+                        target.span,
+                    );
                     return TypeKey::Error;
                 };
 
-                let symbol_info = if let Some(scope) = self.ctx.namespace_scopes.get(&container_id)
-                {
+                // 2. 查找成员 (逻辑保持不变)
+                let symbol_info = if let Some(scope) = self.ctx.namespace_scopes.get(&container_id) {
                     scope.symbols.get(&member.name).cloned()
                 } else {
                     None
                 };
+
                 if let Some((def_id, visibility)) = symbol_info {
-                    // --- 可见性检查 ---
+                    // 检查可见性
                     if visibility == Visibility::Private {
                         self.error(
                             format!("Static member '{}' is private", member.name),
                             member.span,
                         );
-                        // 即使报错，我们继续往下走，记录类型以防级联报错
                     }
 
-                    // 记录解析结果
+                    // 记录路径解析
                     self.ctx.path_resolutions.insert(expr.id, def_id);
 
                     // 返回类型
                     if let Some(ty) = self.get_type_of_def(def_id) {
+                        
+                        // 【补充优化】如果这是个泛型结构体的静态方法 (fn new() -> Box<T>)
+                        // 我们需要把返回类型里的 T 替换成 i32
+                        if let TypeKey::Instantiated { args, .. } = &target_ty {
+                             let concrete_ty = self.ctx.substitute_generics(&ty, container_id, args);
+                             self.record_type(expr.id, concrete_ty.clone());
+                             return concrete_ty;
+                        }
+                        
                         self.record_type(expr.id, ty.clone());
-                        return ty;
+                        ty
                     } else {
-                        // 防御性：符号存在但没有类型记录
-                        return TypeKey::Error;
+                        TypeKey::Error
                     }
                 } else {
-                    // 没找到符号
+                    // 报错逻辑
                     if self.ctx.namespace_scopes.contains_key(&container_id) {
                         self.error(
                             format!("Member '{}' not found in type", member.name),
@@ -1738,6 +2008,35 @@ impl Analyzer {
 
         self.record_type(expr.id, ty.clone());
         ty
+    }
+
+    /// 5. 终结阶段：预计算单态化数据
+    /// 将收集到的泛型实例（生数据）转换为具体的字段列表（熟数据）
+    fn finalize_monomorphization(&mut self) {
+        // 1. 克隆 keys 避免借用冲突
+        let structs_to_process: Vec<TypeKey> = self.ctx.concrete_structs.iter().cloned().collect();
+
+        for struct_key in structs_to_process {
+            if let TypeKey::Instantiated { def_id, args } = &struct_key {
+                // 生成修饰名 (Codegen 的 Key)
+                let mangled_name = self.ctx.get_mangling_type_name(&struct_key);
+
+                // 获取原始字段定义
+                // 注意：这里 clone 一份出来，避免后面 insert 时产生借用冲突
+                if let Some(raw_fields) = self.ctx.struct_definitions.get(def_id).cloned() {
+                    let mut concrete_fields = Vec::new();
+
+                    for (name, raw_ty) in raw_fields {
+                        // 【核心】在这里做替换 (T -> i32)
+                        let concrete_ty = self.ctx.substitute_generics(&raw_ty, *def_id, args);
+                        concrete_fields.push((name, concrete_ty));
+                    }
+
+                    // 存入成品表
+                    self.ctx.instantiated_structs.insert(mangled_name, concrete_fields);
+                }
+            }
+        }
     }
 
     /// ==================================================
@@ -2094,64 +2393,7 @@ impl Analyzer {
         format!("{}_{}", prefix, name)
     }
 
-    // 根据语义类型生成修饰名 (用于 Codegen)
-    // e.g. List<i32> -> "std_collections_List_i32"
-    fn get_mangling_type_name(&self, ty: &TypeKey) -> String {
-        match ty {
-            // 基础类型直接转字符串
-            TypeKey::Primitive(p) => format!("{:?}", p), 
-
-            // 实例化的类型 (List<i32>)
-            TypeKey::Instantiated { def_id, args } => {
-                // 1. 查表获取基础名字 (e.g. "std_collections_List")
-                // 我们在 scan_declarations 阶段已经填好了 mangled_names
-                let base_name = self.ctx.mangled_names.get(def_id)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        // 理论上只要 scan_decl 跑过，这里一定有值
-                        // 除非是匿名类型或其他边缘情况
-                        format!("Struct_{}", def_id.0) 
-                    });
-
-                if args.is_empty() {
-                    base_name
-                } else {
-                    // 2. 递归拼接泛型参数
-                    // List<i32, f64> -> List_I32_F64
-                    let args_str: Vec<String> = args.iter()
-                        .map(|arg| self.get_mangling_type_name(arg))
-                        .collect();
-                    format!("{}_{}", base_name, args_str.join("_"))
-                }
-            }
-
-            // 指针类型
-            TypeKey::Pointer(inner, _) => format!("Ptr_{}", self.get_mangling_type_name(inner)),
-            
-            // 数组类型
-            TypeKey::Array(inner, size) => format!("Arr_{}_{}", size, self.get_mangling_type_name(inner)),
-
-            // 函数指针 (稍微复杂点，把参数全拼起来)
-            TypeKey::Function { params, ret, .. } => {
-                let params_str: Vec<String> = params.iter()
-                    .map(|p| self.get_mangling_type_name(p))
-                    .collect();
-                let ret_str = if let Some(r) = ret {
-                    self.get_mangling_type_name(r)
-                } else {
-                    "Unit".to_string()
-                };
-                format!("Fn_{}_Ret_{}", params_str.join("_"), ret_str)
-            }
-
-            // 泛型参数本身 (T)
-            // 在实例化后应该都被替换了，如果这里还能遇到 T，说明是在生成泛型模板本身的签名？
-            // 或者用于调试。
-            TypeKey::GenericParam(id) => format!("GenParam_{}", id.0),
-
-            _ => "Unknown".to_string(),
-        }
-    }
+    
 
     /// 尝试计算编译时常量表达式
     /// 如果计算成功，返回 Some(u64)
@@ -2364,18 +2606,20 @@ impl Analyzer {
 
     // 复刻 C ABI 布局算法
     fn compute_struct_layout(&self, struct_id: DefId, args: &[TypeKey]) -> Option<Layout> {
-        let field_types = self.ctx.struct_definitions.get(&struct_id)?;
+        let field_list = self.ctx.struct_definitions.get(&struct_id)?;
 
         let mut current_offset = 0u64;
         let mut max_align = 1u64;
 
-        for raw_field_type in field_types {
-            // 【关键修复】先替换 T -> i32
-            let actual_type = self.substitute_generics(raw_field_type, struct_id, args);
+        // 【修改】这里解构 (_, raw_field_type)
+        for (_, raw_field_type) in field_list {
+            // 执行泛型替换 T -> i32
+            let actual_type = self.ctx.substitute_generics(raw_field_type, struct_id, args);
             
-            // 然后计算 i32 的大小
+            // 计算具体类型的大小
             let field_layout = self.get_type_layout(&actual_type)?;
 
+            // ... (对齐和 offset 逻辑保持不变) ...
             let mask = field_layout.align - 1;
             if (current_offset & mask) != 0 {
                 current_offset = (current_offset + mask) & !mask;
@@ -2385,7 +2629,6 @@ impl Analyzer {
                 max_align = field_layout.align;
             }
         }
-
         let mask = max_align - 1;
         if (current_offset & mask) != 0 {
             current_offset = (current_offset + mask) & !mask;
@@ -2412,60 +2655,6 @@ impl Analyzer {
         self.ctx.generic_param_defs.contains(&id)
     }
 
-    /// 泛型替换：将类型中的泛型参数 (T) 替换为具体的实参 (args)
-    /// generic_def_id: 定义泛型的结构体/函数的 ID (用于查找 T 是第几个参数)
-    /// args: 具体的实参列表 (如 [i32])
-    fn substitute_generics(&self, ty: &TypeKey, generic_def_id: DefId, args: &[TypeKey]) -> TypeKey {
-        match ty {
-            // 1. 遇到泛型参数 T
-            TypeKey::GenericParam(param_id) => {
-                // 查表：这个 param_id 是 generic_def_id 的第几个参数？
-                if let Some(param_list) = self.ctx.def_generic_params.get(&generic_def_id) {
-                    if let Some(index) = param_list.iter().position(|id| id == param_id) {
-                        // 找到了！T 是第 index 个参数
-                        if let Some(arg_ty) = args.get(index) {
-                            return arg_ty.clone(); // 替换为 i32
-                        }
-                    }
-                }
-                // 没找到或者越界？返回原样 (理论上不应发生，除非编译器 Bug)
-                ty.clone() 
-            }
-
-            // 2. 递归替换内部类型
-            TypeKey::Pointer(inner, mutability) => {
-                let new_inner = self.substitute_generics(inner, generic_def_id, args);
-                TypeKey::Pointer(Box::new(new_inner), *mutability)
-            }
-            
-            TypeKey::Array(inner, size) => {
-                let new_inner = self.substitute_generics(inner, generic_def_id, args);
-                TypeKey::Array(Box::new(new_inner), *size)
-            }
-
-            // 3. 处理嵌套泛型实例: List<T> -> List<i32>
-            TypeKey::Instantiated { def_id, args: inner_args } => {
-                let new_args = inner_args.iter()
-                    .map(|a| self.substitute_generics(a, generic_def_id, args))
-                    .collect();
-                TypeKey::Instantiated { def_id: *def_id, args: new_args }
-            }
-
-            // 4. 函数指针
-            TypeKey::Function { params, ret, is_variadic } => {
-                let new_params = params.iter()
-                    .map(|p| self.substitute_generics(p, generic_def_id, args))
-                    .collect();
-                let new_ret = ret.as_ref()
-                    .map(|r| Box::new(self.substitute_generics(r, generic_def_id, args)));
-                
-                TypeKey::Function { params: new_params, ret: new_ret, is_variadic: *is_variadic }
-            }
-
-            // 基础类型不变
-            _ => ty.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]

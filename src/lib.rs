@@ -91,7 +91,7 @@ pub fn compile(config: CompileConfig) -> Result<(), Box<dyn Error>> {
     let module = context.create_module(module_name);
     let builder = context.create_builder();
 
-    let mut codegen = CodeGen::new(&context, &module, &builder, &analyzer.ctx);
+    let mut codegen = CodeGen::new(&context, &module, &builder, &analyzer.ctx, &program);
     codegen.compile_program(&program);
 
     // 4. 根据配置输出产物

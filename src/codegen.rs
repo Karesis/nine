@@ -33,26 +33,31 @@ pub struct CodeGen<'a, 'ctx> {
     pub builder: &'a Builder<'ctx>,
 
     /// 语义分析的结果 (只读)
-    pub analyzer: &'a AnalysisContext,
+    pub analysis: &'a AnalysisContext,
 
-    /// 符号表：DefId (AST中的ID) -> LLVM 的内存地址 (Alloca出来的栈变量 或 全局变量)
+    // 局部变量表：DefId -> PointerValue
     pub variables: HashMap<DefId, PointerValue<'ctx>>,
 
-    /// 函数表：DefId -> LLVM 函数对象
-    pub functions: HashMap<DefId, FunctionValue<'ctx>>,
+    // 全局函数表：Mangled Name -> LLVM Function
+    pub functions: HashMap<String, FunctionValue<'ctx>>,
 
-    /// 结构体类型表：DefId -> LLVM 结构体类型
-    pub struct_types: HashMap<DefId, StructType<'ctx>>,
+    // 结构体类型表：Mangled Name -> LLVM StructType
+    pub struct_types: HashMap<String, StructType<'ctx>>,
 
-    /// 结构体字段索引映射：DefId -> (Field Name -> Index)
-    /// 解决 AST 定义顺序与 LLVM GEP 索引一致性的问题
-    pub struct_field_indices: HashMap<DefId, HashMap<String, u32>>,
+    // 结构体字段索引：Mangled Name -> (Field Name -> Index)
+    pub struct_field_indices: HashMap<String, HashMap<String, u32>>,
 
-    /// 循环上下文栈: (break_target, continue_target)
     pub loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
-
-    /// 当前正在编译的函数 (用于处理 return)
     current_fn: Option<FunctionValue<'ctx>>,
+
+    // 当前正在编译的泛型上下文
+    // 当编译泛型函数实例时，需要知道 T 对应什么，以便替换函数体内的局部变量类型
+    // (DefId, Args)
+    generic_context: Option<(DefId, Vec<TypeKey>)>,
+    // 函数定义索引
+    // 解决了 "去哪找函数体" 的问题，避免了 find_function_definition 的递归查找
+    // 生命周期 'a 绑定到 Program 上
+    pub function_index: HashMap<DefId, &'a FunctionDefinition>,
 }
 
 impl<'a, 'ctx> CodeGen<'a, 'ctx> {
@@ -60,19 +65,59 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         context: &'ctx Context,
         module: &'a Module<'ctx>,
         builder: &'a Builder<'ctx>,
-        analyzer: &'a AnalysisContext,
+        analysis: &'a AnalysisContext,
+        program: &'a Program, // 【修改】new 的时候传入 Program，用于构建索引
     ) -> Self {
+        // 1. 构建索引
+        let mut function_index = HashMap::new();
+        Self::build_function_index(&program.items, &mut function_index);
+
         Self {
             context,
             module,
             builder,
-            analyzer,
+            analysis,
             variables: HashMap::new(),
             functions: HashMap::new(),
             struct_types: HashMap::new(),
             struct_field_indices: HashMap::new(),
             loop_stack: Vec::new(),
             current_fn: None,
+            function_index, // 存入
+            generic_context: None,
+        }
+    }
+
+    // 递归遍历 AST，把所有 FunctionDefinition 的引用存入 Map
+    fn build_function_index(
+        items: &'a [Item],
+        index: &mut HashMap<DefId, &'a FunctionDefinition>,
+    ) {
+        for item in items {
+            match &item.kind {
+                ItemKind::FunctionDecl(f) => {
+                    index.insert(f.id, f);
+                }
+                ItemKind::StructDecl(s) => {
+                    for m in &s.static_methods {
+                        index.insert(m.id, m);
+                    }
+                }
+                ItemKind::EnumDecl(e) => {
+                    for m in &e.static_methods {
+                        index.insert(m.id, m);
+                    }
+                }
+                ItemKind::Implementation { methods, .. } => {
+                    for m in methods {
+                        index.insert(m.id, m);
+                    }
+                }
+                ItemKind::ModuleDecl { items: Some(subs), .. } => {
+                    Self::build_function_index(subs, index);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -84,10 +129,18 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         match key {
             TypeKey::Primitive(prim) => Some(self.compile_primitive_type(prim)),
 
-            TypeKey::Named(def_id) => self
-                .struct_types
-                .get(def_id)
-                .map(|st| st.as_basic_type_enum()),
+            // 【修改】处理实例化类型 (Struct<i32>)
+            TypeKey::Instantiated { .. } => {
+                // 1. 获取修饰名
+                let mangled_name = self.analysis.get_mangling_type_name(key);
+                
+                // 2. 查表 (Pass 1 应该已经生成了 Opaque 类型)
+                if let Some(st) = self.struct_types.get(&mangled_name) {
+                    Some(st.as_basic_type_enum())
+                } else {
+                    panic!("ICE: Struct type '{}' not pre-generated.", mangled_name);
+                }
+            }
 
             // 指针在 LLVM IR (Opaque Pointers) 中统一为 ptr
             TypeKey::Pointer(_, _) => Some(
@@ -124,6 +177,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 );
             }
 
+            // 【新增】处理泛型参数 T
+            // 在 Codegen 阶段，T 应该已经被 get_resolved_type 替换掉了。
+            // 如果还能遇到，说明逻辑有漏。
+            TypeKey::GenericParam(id) => {
+                panic!("ICE: GenericParam({:?}) reached Codegen layer!", id);
+            }
+
             // Error 类型也不应该传到 Codegen，Analyzer 应该早就拦截并返回 Err 了
             TypeKey::Error => panic!(
                 "ICE: TypeKey::Error reached Codegen. Compilation should have failed in Analyzer phase."
@@ -139,7 +199,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             PrimitiveType::I64 | PrimitiveType::U64 => self.context.i64_type().as_basic_type_enum(),
             PrimitiveType::ISize | PrimitiveType::USize => {
                 // 根据 Target 的指针宽度决定生成 i32 还是 i64
-                if self.analyzer.target.ptr_byte_width == 4 {
+                if self.analysis.target.ptr_byte_width == 4 {
                     self.context.i32_type().as_basic_type_enum()
                 } else {
                     self.context.i64_type().as_basic_type_enum()
@@ -159,17 +219,172 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     // ========================================================================
 
     pub fn compile_program(&mut self, program: &Program) {
-        // Pass 1: 注册结构体名称
-        self.register_struct_declarations(&program.items);
+        // Step 1: 声明所有结构体 (Opaque)
+        // 这一步是为了让递归结构体（如链表）能引用自己
+        self.declare_concrete_structs();
 
-        // Pass 2: 填充结构体 Body
-        self.fill_struct_bodies(&program.items);
+        // Step 2: 填充结构体 Body
+        // 这一步根据 Analyzer 算好的具体类型，填入字段
+        self.fill_concrete_struct_bodies();
 
-        // Pass 3: 声明所有函数原型
-        self.register_function_prototypes(&program.items);
+        // Step 3: 函数声明 (非泛型 + 泛型实例)
+        // ... (接下来的逻辑，稍后我们处理函数时会写) ...
+        
+        // 3.1 声明普通函数
+        for &def_id in &self.analysis.non_generic_functions {
+            if let Some(func_def) = self.function_index.get(&def_id) {
+                self.declare_function(func_def);
+            }
+        }
 
-        // Pass 4: 编译函数体
-        self.compile_items(&program.items);
+        // 3.2 声明泛型实例
+        let generic_funcs: Vec<_> = self.analysis.concrete_functions.iter().cloned().collect();
+        for (def_id, args) in &generic_funcs {
+            self.declare_monomorphized_function(*def_id, args);
+        }
+
+        // Step 4: 全局变量
+        self.compile_globals(&program.items);
+
+        // Step 5: 函数体编译
+        // 5.1 普通函数
+        for &def_id in &self.analysis.non_generic_functions {
+            if let Some(func_def) = self.function_index.get(&def_id) {
+                self.generic_context = None;
+                self.compile_function(func_def).ok();
+            }
+        }
+
+        // 5.2 泛型实例
+        for (def_id, args) in generic_funcs {
+            self.compile_monomorphized_function(def_id, &args);
+        }
+    }
+
+    // 【Step 1 实现】只负责创建空壳
+    fn declare_concrete_structs(&mut self) {
+        // 遍历 Analyzer 计算出的所有具体结构体 (e.g. "Box_i32", "List_f64")
+        for (mangled_name, _) in &self.analysis.instantiated_structs {
+            let st = self.context.opaque_struct_type(mangled_name);
+            // 存入表：Key 是修饰名 (String)
+            self.struct_types.insert(mangled_name.clone(), st);
+        }
+    }
+
+    // 【Step 2 实现】负责填肉
+    fn fill_concrete_struct_bodies(&mut self) {
+        // 克隆一份数据以避免借用冲突
+        let structs: Vec<_> = self.analysis.instantiated_structs.iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (mangled_name, fields) in structs {
+            let st = *self.struct_types.get(&mangled_name).expect("Struct type missing");
+
+            let mut llvm_field_types = Vec::new();
+            let mut indices = HashMap::new();
+
+            // 这里的 fields 已经是 [(字段名, 具体类型), ...]
+            // 不需要再去查 Analyzer 的 struct_fields 表了，Analyzer 已经把饭喂到嘴边了
+            for (i, (field_name, field_type_key)) in fields.iter().enumerate() {
+                let llvm_ty = self.compile_type(field_type_key).expect("Field type compile failed");
+                
+                llvm_field_types.push(llvm_ty);
+                indices.insert(field_name.clone(), i as u32);
+            }
+
+            st.set_body(&llvm_field_types, false); // packed = false
+            self.struct_field_indices.insert(mangled_name, indices);
+        }
+    }
+
+    fn compile_struct_body(&mut self, mangled_name: &str, fields: &[(String, TypeKey)]) {
+        let st = *self.struct_types.get(mangled_name).unwrap();
+        
+        let mut llvm_fields = Vec::new();
+        let mut indices = HashMap::new();
+
+        for (i, (field_name, field_ty)) in fields.iter().enumerate() {
+            // 这里的 field_ty 已经是 Analyzer 替换好的具体类型了 (i32)，直接编译！
+            let llvm_ty = self.compile_type(field_ty).expect("Field type compile failed");
+            llvm_fields.push(llvm_ty);
+            indices.insert(field_name.clone(), i as u32);
+        }
+
+        st.set_body(&llvm_fields, false);
+        self.struct_field_indices.insert(mangled_name.to_string(), indices);
+    }
+
+    fn declare_monomorphized_function(&mut self, def_id: DefId, args: &[TypeKey]) {
+        let fn_mangled_name = self.analysis.get_mangled_function_name(def_id, args);
+
+        // 如果已经声明过，跳过
+        if self.functions.contains_key(&fn_mangled_name) {
+            return;
+        }
+
+        // 2. 获取原始函数类型 (包含 T)
+        let raw_fn_type = self.analysis.types.get(&def_id).unwrap();
+        
+        // 3. 【关键】执行替换 (T -> i32)
+        // 使用刚刚下沉到 analysis 的方法
+        let actual_fn_type_key = self.analysis.substitute_generics(raw_fn_type, def_id, args);
+
+        // 4. 编译为 LLVM Function Type
+        let llvm_fn_type = self.compile_function_type_signature(&actual_fn_type_key).unwrap();
+
+        // 5. 添加到 Module
+        let val = self.module.add_function(&fn_mangled_name, llvm_fn_type, None);
+        self.functions.insert(fn_mangled_name, val);
+    }
+
+    fn compile_monomorphized_function(&mut self, def_id: DefId, args: &[TypeKey]) {
+        // 1. 直接查索引拿到 AST
+        let func_def = *self.function_index.get(&def_id).expect("Generic function def missing in index");
+
+       let fn_mangled_name = self.analysis.get_mangled_function_name(def_id, args);
+
+        // 3. 获取 FunctionValue
+        let function = *self.functions.get(&fn_mangled_name).expect("Function proto not declared");
+        
+        // 4. 设置上下文
+        self.generic_context = Some((def_id, args.to_vec()));
+        self.current_fn = Some(function);
+
+        // 5. 创建 Entry Block
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+
+        // 6. 编译参数 (Alloca + Store)
+        self.variables.clear();
+        for (i, param) in func_def.params.iter().enumerate() {
+            let arg_val = function.get_nth_param(i as u32).unwrap();
+            arg_val.set_name(&param.name.name);
+
+            // 使用 get_resolved_type 自动替换 T -> i32
+            let param_ty_key = self.get_resolved_type(param.id);
+            let llvm_ty = self.compile_type(&param_ty_key).unwrap();
+
+            let alloca = self.builder.build_alloca(llvm_ty, &param.name.name).unwrap();
+            self.builder.build_store(alloca, arg_val).ok();
+            self.variables.insert(param.id, alloca);
+        }
+
+        // 7. 编译 Body
+        if let Some(body) = &func_def.body {
+            self.compile_block(body).ok();
+        }
+
+        // 8. 补全 Void Return
+        if !self.block_terminated(func_def.body.as_ref().unwrap()) {
+             if func_def.return_type.is_none() {
+                 self.builder.build_return(None).ok();
+             }
+        }
+
+        // 9. 清理
+        self.generic_context = None;
+        self.current_fn = None;
     }
 
     fn compile_items(&mut self, items: &[Item]) {
@@ -217,62 +432,30 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
     }
 
-    // ========================================================================
-    // 3. 结构体与字段管理
-    // ========================================================================
-
-    pub fn register_struct_declarations(&mut self, items: &[Item]) {
+    // 递归遍历 AST，只编译 GlobalVariable
+    fn compile_globals(&mut self, items: &[Item]) {
         for item in items {
             match &item.kind {
-                ItemKind::StructDecl(def) => {
-                    let st = self.context.opaque_struct_type(&def.name.name);
-                    self.struct_types.insert(item.id, st);
+                // 1. 遇到全局变量 -> 编译
+                ItemKind::GlobalVariable(def) => {
+                    self.compile_global_variable(item.id, def);
                 }
-                ItemKind::ModuleDecl {
-                    items: Some(subs), ..
-                } => self.register_struct_declarations(subs),
+                
+                // 2. 遇到模块 -> 递归进入
+                ItemKind::ModuleDecl { items: Some(subs), .. } => {
+                    self.compile_globals(subs);
+                }
+                
+                // 其他类型 (函数、结构体等) 跳过，因为它们在 compile_program 的其他步骤处理了
                 _ => {}
             }
         }
     }
 
-    pub fn fill_struct_bodies(&mut self, items: &[Item]) {
-        for item in items {
-            match &item.kind {
-                ItemKind::StructDecl(def) => {
-                    let st = *self.struct_types.get(&item.id).unwrap();
-                    let mut field_types = Vec::new();
-                    let mut indices = HashMap::new();
-                    for (i, field) in def.fields.iter().enumerate() {
-                        // 从 analyzer 查类型 (Analyzer 存的是 Map<Name, TypeKey>)
-                        let field_map = self
-                            .analyzer
-                            .struct_fields
-                            .get(&item.id)
-                            .expect("Analyzer missed struct");
-                        let type_key = field_map
-                            .get(&field.name.name)
-                            .expect("Analyzer missed field");
-
-                        let llvm_ty = self.compile_type(type_key).expect("Compile type failed");
-                        field_types.push(llvm_ty);
-                        indices.insert(field.name.name.clone(), i as u32);
-                    }
-
-                    st.set_body(&field_types, false); // packed = false
-                    self.struct_field_indices.insert(item.id, indices);
-                }
-                ItemKind::ModuleDecl {
-                    items: Some(subs), ..
-                } => self.fill_struct_bodies(subs),
-                _ => {}
-            }
-        }
-    }
-
-    fn get_field_index(&self, struct_id: DefId, field_name: &str) -> Option<u32> {
+    // Key 变为 mangled_name (String)
+    fn get_field_index(&self, mangled_name: &str, field_name: &str) -> Option<u32> {
         self.struct_field_indices
-            .get(&struct_id)
+            .get(mangled_name)
             .and_then(|indices| indices.get(field_name).cloned())
     }
 
@@ -307,26 +490,28 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
     }
 
+    // 声明非泛型函数
     fn declare_function(&mut self, func: &FunctionDefinition) {
         let param_types = func
             .params
             .iter()
             .map(|p| {
-                let key = self.analyzer.types.get(&p.id).unwrap();
-                self.compile_type(key).unwrap().into()
+                // 使用 get_resolved_type 保持统一，虽然对于非泛型函数 types.get 也行
+                let key = self.get_resolved_type(p.id);
+                self.compile_type(&key).unwrap().into()
             })
             .collect::<Vec<_>>();
 
-        let ret_key = self.analyzer.types.get(&func.id).unwrap();
+        let ret_key = self.get_resolved_type(func.id);
 
         // 解析 FunctionType
         let fn_type = if let TypeKey::Function { ret: Some(r), .. } = ret_key {
-            if let TypeKey::Primitive(PrimitiveType::Unit) = **r {
+            if let TypeKey::Primitive(PrimitiveType::Unit) = *r {
                 self.context
                     .void_type()
                     .fn_type(&param_types, func.is_variadic)
             } else {
-                let ret_ty = self.compile_type(r).unwrap();
+                let ret_ty = self.compile_type(&r).unwrap();
                 ret_ty.fn_type(&param_types, func.is_variadic)
             }
         } else {
@@ -335,41 +520,51 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 .fn_type(&param_types, func.is_variadic)
         };
 
-        // 优先查 mangled_names，如果查不到（理论上不应发生），回退到原始名
-        //? TODO: 更严谨的处理和更多的报错
+        // 【修正】获取 Mangled Name (String)
         let fn_name = self
-            .analyzer
+            .analysis
             .mangled_names
             .get(&func.id)
             .cloned()
             .unwrap_or(func.name.name.clone());
 
-        // 使用 fn_name 而不是 func.name.name
+        // 这里的 fn_name 已经是 String 了
         let val = self.module.add_function(&fn_name, fn_type, None);
-        self.functions.insert(func.id, val);
+        
+        // 【修正】使用 String 作为 Key
+        self.functions.insert(fn_name, val);
     }
 
     pub fn compile_function(&mut self, func: &FunctionDefinition) -> Result<(), String> {
         if func.body.is_none() {
             return Ok(());
         }
-
-        // 既然上面检查过了，这里直接as_ref
         let body_ref = func.body.as_ref().unwrap();
 
-        let function = *self.functions.get(&func.id).ok_or("Proto missing")?;
+        // 1. 【修正】通过 Mangled Name 查找函数
+        // 因为这是 compile_function（只用于非泛型），所以泛型参数列表为空 &[]
+        let fn_mangled_name = self.analysis.get_mangled_function_name(func.id, &[]);
+        
+        let function = *self.functions.get(&fn_mangled_name)
+            .ok_or_else(|| format!("Function proto '{}' missing", fn_mangled_name))?;
+            
         self.current_fn = Some(function);
 
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
-        // 处理参数：Alloca + Store
+        // 2. 处理参数
+        // 建议先清空 variables，防止上一此编译的残留（虽然这里 map 是覆盖，但清空更安全）
+        self.variables.clear(); 
+        
         for (i, param) in func.params.iter().enumerate() {
             let arg_val = function.get_nth_param(i as u32).unwrap();
             arg_val.set_name(&param.name.name);
 
-            let param_ty_key = self.analyzer.types.get(&param.id).unwrap();
-            let llvm_ty = self.compile_type(param_ty_key).unwrap();
+            // 【修正】统一使用 get_resolved_type
+            // 尽管对于非泛型函数，types.get 也能拿到正确结果，但保持一致性更好
+            let param_ty_key = self.get_resolved_type(param.id);
+            let llvm_ty = self.compile_type(&param_ty_key).unwrap();
 
             let alloca = self
                 .builder
@@ -379,15 +574,23 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
             self.variables.insert(param.id, alloca);
         }
+
+        // 3. 编译函数体
         self.compile_block(body_ref)?;
 
+        // 4. 处理 Void 返回
         if !self.block_terminated(body_ref) {
             if func.return_type.is_none() {
                 self.builder.build_return(None).ok();
             } else {
-                unreachable!();
+                // 如果 Analyzer 做了控制流分析，这里理论上不可达。
+                // 但为了防止 Codegen Crash，给个友好的错误比 unreachable! 更好
+                return Err(format!("Function '{}' missing return statement", func.name.name));
             }
         }
+        
+        // 5. 清理状态
+        self.current_fn = None;
 
         Ok(())
     }
@@ -422,7 +625,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 // 1. 获取准确类型 (Analyzer 已推导)
                 //？ 支持更多的推导？
                 //？ 新的语法设计？（auto?)
-                let type_key = self.analyzer.types.get(&stmt.id).unwrap();
+                let type_key = self.analysis.types.get(&stmt.id).unwrap();
                 let llvm_ty = self.compile_type(type_key).unwrap();
 
                 // 2. 栈分配
@@ -677,7 +880,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             ExpressionKind::Literal(lit) => {
                 // 查 Analyzer 的回写结果，精确控制位宽
                 let type_key = self
-                    .analyzer
+                    .analysis
                     .types
                     .get(&expr.id)
                     .ok_or("Literal Type Missing")?;
@@ -699,7 +902,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                         let ptr = self.compile_expr(operand)?.into_pointer_value();
 
                         let res_type_key = self
-                            .analyzer
+                            .analysis
                             .types
                             .get(&expr.id)
                             .ok_or("Dereference result type missing in analyzer")?;
@@ -759,7 +962,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             | ExpressionKind::Index { .. }
             | ExpressionKind::FieldAccess { .. } => {
                 let ptr = self.compile_expr_ptr(expr)?;
-                let type_key = self.analyzer.types.get(&expr.id).unwrap();
+                let type_key = self.analysis.types.get(&expr.id).unwrap();
                 let llvm_ty = self.compile_type(type_key).unwrap();
                 let val = self
                     .builder
@@ -776,18 +979,43 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             } => self.compile_cast(src_expr, target_type, expr.id),
 
             ExpressionKind::StructLiteral { type_name, fields } => {
-                let def_id = self.analyzer.path_resolutions.get(&type_name.id).unwrap();
+                // 1. 获取该表达式在当前上下文中的具体类型 (Analyzer 已计算好)
+                // 例如：Instantiated { def_id: Box, args: [i32] }
+                let struct_key = self.get_resolved_type(expr.id);
+
+                // 2. 获取 Codegen 用的唯一修饰名 (例如 "Box_i32")
+                let mangled_name = self.analysis.get_mangling_type_name(&struct_key);
+
+                // 3. 查表获取 LLVM 结构体类型
+                // 这里我们要解引用 (*) 拿到 StructType (它是 Copy 的)，
+                // 这样就不再借用 self.struct_types 了
                 let struct_type = *self
                     .struct_types
-                    .get(def_id)
-                    .expect("Struct type not found");
+                    .get(&mangled_name)
+                    .unwrap_or_else(|| panic!("Struct type '{}' not found in codegen", mangled_name));
 
+                // 4. 【核心修正】查表获取字段索引映射，并 CLONE
+                // .clone() 会把 HashMap 复制一份。
+                // 这样 index_map 就变成了 owned data，不再借用 self。
+                let index_map = self
+                    .struct_field_indices
+                    .get(&mangled_name)
+                    .unwrap_or_else(|| panic!("Indices for '{}' not found", mangled_name))
+                    .clone(); // <--- 关键！切断借用链
+
+                // 此时 self 身上没有任何借用，完全自由！
+
+                // 5. 构建结构体值
                 let mut struct_val = struct_type.get_undef();
 
-                let index_map = self.struct_field_indices.get(def_id).unwrap().clone();
                 for field in fields {
+                    // 现在可以放心地 mut borrow self 了
                     let val = self.compile_expr(&field.value)?;
-                    let idx = *index_map.get(&field.field_name.name).unwrap();
+                    
+                    // index_map 是我们拥有的局部变量，随便用
+                    let idx = *index_map
+                        .get(&field.field_name.name)
+                        .ok_or_else(|| format!("Field '{}' not found", field.field_name.name))?;
 
                     struct_val = self
                         .builder
@@ -804,26 +1032,44 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 method_name,
                 arguments,
             } => {
-                // 1. 获取 Receiver 的类型
-                let receiver_ty_key = self.analyzer.types.get(&receiver.id).unwrap();
+                // 1. 获取 Receiver 的具体类型 (e.g., Box<i32>)
+                // 使用 get_resolved_type 确保 T 被替换
+                let receiver_ty_key = self.get_resolved_type(receiver.id);
 
-                // 2. 查 Analyzer 的 method_registry 找到对应的函数定义 ID
+                // 2. 查找方法定义 ID
+                // method_registry 是按 TypeKey 索引的，所以能找到
                 let methods = self
-                    .analyzer
+                    .analysis
                     .method_registry
-                    .get(receiver_ty_key)
-                    .ok_or(format!("No methods found for type {:?}", receiver_ty_key))?;
+                    .get(&receiver_ty_key)
+                    .ok_or_else(|| format!("No methods found for type {:?}", receiver_ty_key))?;
 
                 let method_info = methods
                     .get(&method_name.name)
-                    .ok_or(format!("Method '{}' not found", method_name.name))?;
+                    .ok_or_else(|| format!("Method '{}' not found", method_name.name))?;
+
+                // 3. 【核心修正】重建函数的修饰名来查找 FunctionValue
+                // 我们需要知道这个方法使用了哪些泛型参数。
+                // 通常，方法的泛型参数 = Receiver 的泛型参数 (对于 impl<T> Struct<T>)
+                // (如果方法本身也有泛型 fn foo<U>，这里需要合并，但目前假设方法无额外泛型)
+                
+                let method_args = match &receiver_ty_key {
+                    TypeKey::Instantiated { args, .. } => args.clone(),
+                    _ => Vec::new(), // 非泛型类型，参数为空
+                };
+
+                // 使用 Analyzer 提供的统一命名逻辑
+                let fn_mangled_name = self.analysis.get_mangled_function_name(
+                    method_info.def_id, 
+                    &method_args
+                );
 
                 let fn_val = *self
                     .functions
-                    .get(&method_info.def_id)
-                    .expect("Function not compiled");
+                    .get(&fn_mangled_name)
+                    .unwrap_or_else(|| panic!("Function '{}' not compiled", fn_mangled_name));
 
-                // 3. 准备参数列表：[Receiver, ...Args]
+                // 4. 准备参数列表：[Receiver, ...Args]
                 let mut compiled_args = Vec::new();
 
                 // 处理 `self` 参数
@@ -833,13 +1079,13 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     compiled_args.push(self.compile_expr(arg)?.into());
                 }
 
-                // 4. 生成 Call
+                // 5. 生成 Call
                 let call_site = self
                     .builder
                     .build_call(fn_val, &compiled_args, "method_call")
                     .map_err(|_| "Method call failed")?;
 
-                // 5. 处理返回值
+                // 6. 处理返回值
                 use inkwell::values::ValueKind;
                 match call_site.try_as_basic_value() {
                     ValueKind::Basic(val) => Ok(val),
@@ -848,7 +1094,6 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                         .struct_type(&[], false)
                         .const_zero()
                         .as_basic_value_enum()),
-                    _ => Err("Invalid call return".into()),
                 }
             }
 
@@ -856,7 +1101,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 target: _,
                 member: _,
             } => {
-                if let Some(TypeKey::IntegerLiteral(val)) = self.analyzer.types.get(&expr.id) {
+                if let Some(TypeKey::IntegerLiteral(val)) = self.analysis.types.get(&expr.id) {
                     // 默认生成 i64
                     //? TODO: 查 Enum的underlying type生成具体的跳转
                     Ok(self
@@ -878,7 +1123,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             ExpressionKind::AlignOf(target_type) => {
                 // 1. 获取 TypeKey
                 let type_key = self
-                    .analyzer
+                    .analysis
                     .types
                     .get(&target_type.id)
                     .ok_or("AlignOf target type not resolved")?;
@@ -897,7 +1142,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     pub fn compile_expr_ptr(&mut self, expr: &Expression) -> Result<PointerValue<'ctx>, String> {
         match &expr.kind {
             ExpressionKind::Path(path) => {
-                let def_id = self.analyzer.path_resolutions.get(&path.id).unwrap();
+                let def_id = self.analysis.path_resolutions.get(&path.id).unwrap();
                 self.get_variable_ptr(*def_id).ok_or("Var missing".into())
             }
 
@@ -905,32 +1150,44 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 receiver,
                 field_name,
             } => {
+                // 1. 编译 Receiver 的指针
                 let ptr = self.compile_expr_ptr(receiver)?;
-                // 获取 Receiver 的 Struct DefId
-                let recv_key = self.analyzer.types.get(&receiver.id).unwrap();
-                let struct_id = if let TypeKey::Named(id) = recv_key {
-                    *id
+                
+                // 2. 获取 Receiver 的具体类型 (关键：使用 get_resolved_type 替换泛型 T -> i32)
+                let recv_type_key = self.get_resolved_type(receiver.id);
+
+                // 3. 确保是实例化类型 (Struct<T> 或 Struct)
+                if let TypeKey::Instantiated { .. } = &recv_type_key {
+                    // 4. 获取 Mangled Name (e.g. "Box_i32")
+                    let mangled_name = self.analysis.get_mangling_type_name(&recv_type_key);
+
+                    // 5. 使用 Mangled Name 查索引
+                    let idx = self
+                        .get_field_index(&mangled_name, &field_name.name)
+                        .ok_or_else(|| format!("Field '{}' missing in struct '{}'", field_name.name, mangled_name))?;
+
+                    // 6. 使用 Mangled Name 查 LLVM Type
+                    let st_ty = *self
+                        .struct_types
+                        .get(&mangled_name)
+                        .expect("Struct type missing in codegen");
+
+                    // 7. 生成 GEP
+                    let field_ptr = unsafe {
+                        self.builder
+                            .build_struct_gep(st_ty, ptr, idx, "gep")
+                            .map_err(|_| "GEP failed")?
+                    };
+                    Ok(field_ptr)
                 } else {
-                    return Err("Not a struct".into());
-                };
-
-                let idx = self
-                    .get_field_index(struct_id, &field_name.name)
-                    .ok_or("Field missing")?;
-                let st_ty = *self.struct_types.get(&struct_id).unwrap();
-
-                let field_ptr = unsafe {
-                    self.builder
-                        .build_struct_gep(st_ty, ptr, idx, "gep")
-                        .map_err(|_| "GEP failed")?
-                };
-                Ok(field_ptr)
+                    return Err(format!("Field access on non-struct type: {:?}", recv_type_key));
+                }
             }
 
             ExpressionKind::Index { target, index } => {
                 let ptr = self.compile_expr_ptr(target)?;
                 let idx = self.compile_expr(index)?.into_int_value();
-                let target_key = self.analyzer.types.get(&target.id).unwrap();
+                let target_key = self.analysis.types.get(&target.id).unwrap();
 
                 match target_key {
                     TypeKey::Array(inner, _) => {
@@ -1054,7 +1311,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         if lhs_val.is_pointer_value() {
             // 获取 LHS 的类型信息 (Analyzer 必须保证类型存在)
             let lhs_type_key = self
-                .analyzer
+                .analysis
                 .types
                 .get(&lhs.id)
                 .ok_or("Type missing for pointer op")?;
@@ -1074,7 +1331,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
             // 获取类型以判断符号 (Signed/Unsigned)
             let type_key = self
-                .analyzer
+                .analysis
                 .types
                 .get(&lhs.id)
                 .ok_or("Type missing for binary op")?;
@@ -1373,47 +1630,81 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             compiled_args.push(self.compile_expr(arg)?.into());
         }
 
-        // 2. 尝试Direct Call
-        // 如果 callee 是一个直接的 Path，且该 Path 指向已知的函数定义
+        // =========================================================
+        // Case 1: 直接函数调用 (Direct Call)
+        // e.g. foo(1) 或 foo#<i32>(1)
+        // =========================================================
         if let ExpressionKind::Path(path) = &callee.kind {
-            if let Some(def_id) = self.analyzer.path_resolutions.get(&path.id) {
-                // 在 functions 表里找，如果找到了，说明是全局函数
-                if let Some(fn_val) = self.functions.get(def_id) {
+            if let Some(&def_id) = self.analysis.path_resolutions.get(&path.id) {
+                // A. 查 Analyzer 的表，获取该调用使用的泛型实参 (e.g. [i32])
+                // 如果是普通函数，这里就是空的
+                let generic_args = self.analysis.node_generic_args
+                    .get(&callee.id)
+                    .cloned()
+                    .unwrap_or_default();
+
+                // B. 重建修饰名 (Mangled Name)
+                // e.g. "foo_i32"
+                let fn_mangled_name = self.analysis.get_mangled_function_name(def_id, &generic_args);
+
+                // C. 查表获取 LLVM Function
+                if let Some(fn_val) = self.functions.get(&fn_mangled_name) {
                     let call_site = self
                         .builder
                         .build_call(*fn_val, &compiled_args, "direct_call")
                         .map_err(|_| "Direct call failed")?;
                     return self.handle_call_return(call_site);
+                } else {
+                    // 如果 Analyzer 没问题，这里理论上不应该找不到
+                    panic!("ICE: Function '{}' resolved but not compiled in codegen", fn_mangled_name);
                 }
             }
         }
 
-        // 静态方法调用 (Struct::method)
-        if let ExpressionKind::StaticAccess { target: _, member } = &callee.kind {
-            if let Some(def_id) = self.analyzer.path_resolutions.get(&callee.id) {
-                if let Some(fn_val) = self.functions.get(def_id) {
+        // =========================================================
+        // Case 2: 静态方法调用 (Static Method Call)
+        // e.g. Box::new(1) 或 MyStruct#<i32>::method()
+        // =========================================================
+        if let ExpressionKind::StaticAccess { .. } = &callee.kind {
+            if let Some(&def_id) = self.analysis.path_resolutions.get(&callee.id) {
+                // A. 查表获取泛型实参
+                // 对于 Box<i32>::new，Analyzer 应该已经把 [i32] 填入 node_generic_args 了
+                let generic_args = self.analysis.node_generic_args
+                    .get(&callee.id)
+                    .cloned()
+                    .unwrap_or_default();
+
+                // B. 重建修饰名
+                let fn_mangled_name = self.analysis.get_mangled_function_name(def_id, &generic_args);
+
+                // C. 查表
+                if let Some(fn_val) = self.functions.get(&fn_mangled_name) {
                     let call_site = self
                         .builder
                         .build_call(*fn_val, &compiled_args, "static_call")
                         .map_err(|_| "Static call failed")?;
                     return self.handle_call_return(call_site);
+                } else {
+                    panic!("ICE: Static method '{}' resolved but not compiled", fn_mangled_name);
                 }
             }
         }
 
-        // 3. “间接调用” (Indirect Call) - 函数指针
+        // =========================================================
+        // Case 3: 间接调用 (Indirect Call / Function Pointer)
+        // e.g. let f = foo; f();
+        // =========================================================
+        
         // A. 编译表达式得到函数指针 (PointerValue)
         let fn_ptr_val = self.compile_expr(callee)?.into_pointer_value();
 
         // B. 获取函数类型签名
-        let callee_type_key = self
-            .analyzer
-            .types
-            .get(&callee.id)
-            .ok_or("Callee type missing in analyzer")?;
+        // 【关键修正】必须使用 get_resolved_type 而不是直接查 types
+        // 因为如果这是一个泛型函数里的间接调用 (let f: fn(T) -> T)，我们需要把 T 换成具体类型
+        let callee_type_key = self.get_resolved_type(callee.id);
 
         // C. 将 TypeKey 转换为 LLVM FunctionType
-        let fn_type = self.compile_function_type_signature(callee_type_key)?;
+        let fn_type = self.compile_function_type_signature(&callee_type_key)?;
 
         // D. 生成间接调用指令
         let call_site = self
@@ -1554,12 +1845,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         // src_key: 源表达式的语义类型
         // target_key: Cast 表达式本身的语义类型
         let src_key = self
-            .analyzer
+            .analysis
             .types
             .get(&src_expr.id)
             .ok_or("Source type missing")?;
         let target_key = self
-            .analyzer
+            .analysis
             .types
             .get(&cast_expr_id)
             .ok_or("Target type missing")?;
@@ -1729,7 +2020,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     // 全局变量编译逻辑
     fn compile_global_variable(&mut self, id: DefId, def: &GlobalDefinition) {
         // 1. 获取类型
-        let ty_key = self.analyzer.types.get(&id).unwrap();
+        let ty_key = self.analysis.types.get(&id).unwrap();
         let llvm_ty = self.compile_type(ty_key).unwrap();
 
         // 2. 获取修饰名
@@ -1737,7 +2028,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let name = if def.is_extern {
             def.name.name.clone()
         } else {
-            self.analyzer
+            self.analysis
                 .mangled_names
                 .get(&id)
                 .cloned()
@@ -1761,14 +2052,14 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             if let Some(init) = &def.initializer {
                 // A: 如果是简单字面量 (String, Float, Bool)，直接编译
                 if let ExpressionKind::Literal(lit) = &init.kind {
-                    let lit_ty = self.analyzer.types.get(&init.id).unwrap();
+                    let lit_ty = self.analysis.types.get(&init.id).unwrap();
                     let val = self
                         .compile_literal(lit, lit_ty)
                         .expect("Literal compile failed");
                     global.set_initializer(&val);
                 }
                 // B: 如果 Analyzer 已经计算出了整数值 (Int 运算和 指针强转)
-                else if let Some(&const_val) = self.analyzer.constants.get(&id) {
+                else if let Some(&const_val) = self.analysis.constants.get(&id) {
                     if llvm_ty.is_int_type() {
                         // 情况 1: 整数类型 (i32, u64...)
                         let int_ty = llvm_ty.into_int_type();
@@ -1808,7 +2099,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     // 辅助函数：编译 sizeof
     fn compile_sizeof(&self, target_type: &Type) -> Result<BasicValueEnum<'ctx>, String> {
         // 1. 从 Analyzer 获取类型键
-        let type_key = self.analyzer.types.get(&target_type.id).ok_or_else(|| {
+        let type_key = self.analysis.types.get(&target_type.id).ok_or_else(|| {
             format!(
                 "Sizeof target type {:?} not resolved by analyzer",
                 target_type
@@ -1958,6 +2249,18 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         match p {
             PrimitiveType::F32 | PrimitiveType::F64 => true,
             _ => false,
+        }
+    }
+
+    // 获取 AST 节点的类型，并根据当前泛型上下文进行替换
+    fn get_resolved_type(&self, id: NodeId) -> TypeKey {
+        let raw_ty = self.analysis.types.get(&id).expect("Type missing in analyzer");
+        
+        if let Some((def_id, args)) = &self.generic_context {
+            // 如果当前在泛型函数里，执行替换 (T -> i32)
+            self.analysis.substitute_generics(raw_ty, *def_id, args)
+        } else {
+            raw_ty.clone()
         }
     }
 }
