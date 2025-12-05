@@ -26,6 +26,12 @@ use std::collections::HashMap;
 use crate::analyzer::{AnalysisContext, DefId, TypeKey};
 use crate::ast::*;
 
+macro_rules! trace {
+    ($($arg:tt)*) => {
+        eprintln!("[Codegen] {}", format!($($arg)*));
+    };
+}
+
 /// 代码生成器结构体
 pub struct CodeGen<'a, 'ctx> {
     pub context: &'ctx Context,
@@ -247,17 +253,31 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.compile_globals(&program.items);
 
         // Step 5: 函数体编译
-        // 5.1 普通函数
-        for &def_id in &self.analysis.non_generic_functions {
-            if let Some(func_def) = self.function_index.get(&def_id) {
+        // 5.1 编译普通函数
+        // 【修复】先 collect 到一个临时 Vec，断开对 self.analysis 的借用
+        let non_generic_ids: Vec<_> = self.analysis.non_generic_functions.iter().cloned().collect();
+        
+        for def_id in non_generic_ids {
+            // 注意：self.function_index.get 返回的是 &&FunctionDefinition
+            // 我们需要 copier() 或者 * 解引用拿到 &'a FunctionDefinition
+            // 这样就不会锁住 self.function_index 了
+            if let Some(&func_def) = self.function_index.get(&def_id) {
                 self.generic_context = None;
-                self.compile_function(func_def).ok();
+                
+                // 现在可以放心调用 mut self 的方法了
+                if let Err(e) = self.compile_function(func_def) {
+                    panic!("Failed to compile function '{}': {}", func_def.name.name, e);
+                }
             }
         }
 
-        // 5.2 泛型实例
+        // 5.2 编译泛型实例
+        // 【修复】同理，先 collect
+        let generic_funcs: Vec<_> = self.analysis.concrete_functions.iter().cloned().collect();
+        
         for (def_id, args) in generic_funcs {
-            self.compile_monomorphized_function(def_id, &args);
+            // 这里的 panic 也是必要的，generic_funcs 编译失败也应该炸
+            self.compile_monomorphized_function(def_id, &args); 
         }
     }
 
@@ -324,11 +344,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
 
         // 2. 获取原始函数类型 (包含 T)
-        let raw_fn_type = self.analysis.types.get(&def_id).unwrap();
+        let raw_fn_type = self.get_resolved_type(def_id);
         
         // 3. 【关键】执行替换 (T -> i32)
         // 使用刚刚下沉到 analysis 的方法
-        let actual_fn_type_key = self.analysis.substitute_generics(raw_fn_type, def_id, args);
+        let actual_fn_type_key = self.analysis.substitute_generics(&raw_fn_type, def_id, args);
 
         // 4. 编译为 LLVM Function Type
         let llvm_fn_type = self.compile_function_type_signature(&actual_fn_type_key).unwrap();
@@ -536,6 +556,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     }
 
     pub fn compile_function(&mut self, func: &FunctionDefinition) -> Result<(), String> {
+        trace!("Compiling function: {}", func.name.name);
         if func.body.is_none() {
             return Ok(());
         }
@@ -615,6 +636,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     }
 
     pub fn compile_stmt(&mut self, stmt: &Statement) -> Result<(), String> {
+        trace!("  Compiling stmt: {:?}", stmt.kind);
         match &stmt.kind {
             StatementKind::VariableDeclaration {
                 name,
@@ -625,8 +647,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 // 1. 获取准确类型 (Analyzer 已推导)
                 //？ 支持更多的推导？
                 //？ 新的语法设计？（auto?)
-                let type_key = self.analysis.types.get(&stmt.id).unwrap();
-                let llvm_ty = self.compile_type(type_key).unwrap();
+                let type_key = self.get_resolved_type(stmt.id);
+                let llvm_ty = self.compile_type(&type_key).unwrap();
 
                 // 2. 栈分配
                 let ptr = self
@@ -876,15 +898,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     // ========================================================================
 
     pub fn compile_expr(&mut self, expr: &Expression) -> Result<BasicValueEnum<'ctx>, String> {
+        trace!("    Compiling expr: {:?}", expr.kind);
         match &expr.kind {
             ExpressionKind::Literal(lit) => {
-                // 查 Analyzer 的回写结果，精确控制位宽
-                let type_key = self
-                    .analysis
-                    .types
-                    .get(&expr.id)
-                    .ok_or("Literal Type Missing")?;
-                self.compile_literal(lit, type_key)
+                let type_key = self.get_resolved_type(expr.id);
+                self.compile_literal(lit, &type_key)
             }
 
             ExpressionKind::Binary { lhs, op, rhs } => self.compile_binary(lhs, *op, rhs),
@@ -961,13 +979,25 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             ExpressionKind::Path(_)
             | ExpressionKind::Index { .. }
             | ExpressionKind::FieldAccess { .. } => {
+                trace!("    [Load] 1. Compiling ptr...");
                 let ptr = self.compile_expr_ptr(expr)?;
-                let type_key = self.analysis.types.get(&expr.id).unwrap();
-                let llvm_ty = self.compile_type(type_key).unwrap();
+                trace!("    [Load] 1. Ptr compiled. Is Null? {}", ptr.is_null());
+                
+                trace!("    [Load] 2. Getting type key for Expr ID {:?}...", expr.id);
+                let type_key = self.get_resolved_type(expr.id);
+                trace!("    [Load] 2. Type key resolved: {:?}", type_key);
+                
+                trace!("    [Load] 3. Compiling LLVM type...");
+                let llvm_ty = self.compile_type(&type_key).unwrap();
+                trace!("    [Load] 3. LLVM Type compiled: {:?}", llvm_ty);
+                
+                trace!("    [Load] 4. Building Load instruction...");
                 let val = self
                     .builder
                     .build_load(llvm_ty, ptr, "load")
                     .map_err(|_| "Load failed")?;
+                trace!("    [Load] 5. Load successful.");
+                
                 Ok(val)
             }
 
@@ -1017,6 +1047,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                         .get(&field.field_name.name)
                         .ok_or_else(|| format!("Field '{}' not found", field.field_name.name))?;
 
+                    eprintln!("[Codegen Debug] Inserting field '{}' at index {} into struct '{}'", field.field_name.name, idx, mangled_name);
+                    eprintln!("[Codegen Debug]   Value type: {:?}", val.get_type());
+                    eprintln!("[Codegen Debug]   Struct type: {:?}", struct_type);
+
                     struct_val = self
                         .builder
                         .build_insert_value(struct_val, val, idx, "insert")
@@ -1033,32 +1067,46 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 arguments,
             } => {
                 // 1. 获取 Receiver 的具体类型 (e.g., Box<i32>)
-                // 使用 get_resolved_type 确保 T 被替换
                 let receiver_ty_key = self.get_resolved_type(receiver.id);
 
-                // 2. 查找方法定义 ID
-                // method_registry 是按 TypeKey 索引的，所以能找到
-                let methods = self
-                    .analysis
-                    .method_registry
-                    .get(&receiver_ty_key)
+                // === 2. 查找方法定义 (修复点：模糊查找) ===
+                // method_registry 的 Key 是定义时的类型 (Pair<T>)，而我们手里的是 Pair<i32>
+                // 所以不能直接 get，必须遍历寻找 DefId 匹配的条目
+                
+                let mut found_methods = None;
+
+                // A. 先尝试直接查找 (针对非泛型普通类型)
+                if let Some(methods) = self.analysis.method_registry.get(&receiver_ty_key) {
+                    found_methods = Some(methods);
+                } 
+                // B. 如果找不到且是泛型实例，尝试匹配 DefId
+                else if let TypeKey::Instantiated { def_id, .. } = &receiver_ty_key {
+                    for (key, methods) in &self.analysis.method_registry {
+                        if let TypeKey::Instantiated { def_id: k_id, .. } = key {
+                            // 只要 DefId (结构体ID) 相同，说明就是这个结构体的方法表
+                            if k_id == def_id {
+                                found_methods = Some(methods);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                let methods = found_methods
                     .ok_or_else(|| format!("No methods found for type {:?}", receiver_ty_key))?;
 
                 let method_info = methods
                     .get(&method_name.name)
                     .ok_or_else(|| format!("Method '{}' not found", method_name.name))?;
 
-                // 3. 【核心修正】重建函数的修饰名来查找 FunctionValue
-                // 我们需要知道这个方法使用了哪些泛型参数。
-                // 通常，方法的泛型参数 = Receiver 的泛型参数 (对于 impl<T> Struct<T>)
-                // (如果方法本身也有泛型 fn foo<U>，这里需要合并，但目前假设方法无额外泛型)
-                
+                // === 3. 重建函数的修饰名 ===
+                // 我们需要知道这个方法使用了哪些泛型参数 [i32]
                 let method_args = match &receiver_ty_key {
                     TypeKey::Instantiated { args, .. } => args.clone(),
-                    _ => Vec::new(), // 非泛型类型，参数为空
+                    _ => Vec::new(),
                 };
 
-                // 使用 Analyzer 提供的统一命名逻辑
+                // 使用 Analyzer 提供的逻辑生成 "Pair_i32_get_second"
                 let fn_mangled_name = self.analysis.get_mangled_function_name(
                     method_info.def_id, 
                     &method_args
@@ -1094,25 +1142,25 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                         .struct_type(&[], false)
                         .const_zero()
                         .as_basic_value_enum()),
+                    _ => Err("Invalid call return".into()),
                 }
             }
 
-            ExpressionKind::StaticAccess {
-                target: _,
-                member: _,
-            } => {
-                if let Some(TypeKey::IntegerLiteral(val)) = self.analysis.types.get(&expr.id) {
+            ExpressionKind::StaticAccess { target: _, member: _ } => {
+                // 1. 使用 get_resolved_type 获取具体类型
+                let ty = self.get_resolved_type(expr.id);
+
+                // 2. 匹配 TypeKey
+                if let TypeKey::IntegerLiteral(val) = ty {
                     // 默认生成 i64
-                    //? TODO: 查 Enum的underlying type生成具体的跳转
                     Ok(self
                         .context
                         .i64_type()
-                        .const_int(*val, false)
+                        .const_int(val, false)
                         .as_basic_value_enum())
                 } else {
-                    // 可能是读取静态变量 (Static Var)，暂时报错
-                    //? TODO: Enum 读取静态变量?
-                    Err("Static access (non-enum) not implemented".into())
+                    // 可能是读取静态变量，或者 Enum 不是简单的整数
+                    Err("Static access (non-enum/non-const) not implemented".into())
                 }
             }
 
@@ -1142,7 +1190,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     pub fn compile_expr_ptr(&mut self, expr: &Expression) -> Result<PointerValue<'ctx>, String> {
         match &expr.kind {
             ExpressionKind::Path(path) => {
-                let def_id = self.analysis.path_resolutions.get(&path.id).unwrap();
+                let def_id = self.analysis.path_resolutions.get(&expr.id).unwrap();
                 self.get_variable_ptr(*def_id).ok_or("Var missing".into())
             }
 
@@ -1187,11 +1235,18 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             ExpressionKind::Index { target, index } => {
                 let ptr = self.compile_expr_ptr(target)?;
                 let idx = self.compile_expr(index)?.into_int_value();
-                let target_key = self.analysis.types.get(&target.id).unwrap();
+                
+                // 1. 获取类型 (Owned)
+                let target_key = self.get_resolved_type(target.id);
 
-                match target_key {
-                    TypeKey::Array(inner, _) => {
-                        let arr_ty = self.compile_type(target_key).unwrap();
+                // 2. 【关键】使用引用进行匹配 (&target_key)
+                // 这样 inner 就变成了 &Box<TypeKey> (引用)，而不是 Box<TypeKey> (所有权)
+                match &target_key {
+                    TypeKey::Array(_inner, _) => {
+                        // 这里我们再次使用 &target_key，它是完整的，因为上面只是借用
+                        // 对于 GEP Array，我们需要数组本身的类型 [10 x i32]
+                        let arr_ty = self.compile_type(&target_key).unwrap();
+                        
                         let p = unsafe {
                             self.builder
                                 .build_gep(
@@ -1202,10 +1257,15 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                                 )
                                 .unwrap()
                         };
-                        Ok(p)
+                        Ok(p) // 记得转 Enum
                     }
                     TypeKey::Pointer(inner, _) => {
+                        // inner 是 &Box<TypeKey>
+                        // compile_type 需要 &TypeKey
+                        // Box 实现了 Deref，所以直接传 inner 即可自动解引用
+                        // 或者显式写 &**inner
                         let inner_ty = self.compile_type(inner).unwrap();
+                        
                         let p = unsafe {
                             self.builder
                                 .build_gep(inner_ty, ptr, &[idx], "ptr_gep")
@@ -1213,7 +1273,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                         };
                         Ok(p)
                     }
-                    _ => Err("Index error".into()),
+                    _ => Err("Index error: expected Array or Pointer".into()),
                 }
             }
 
@@ -1624,6 +1684,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         callee: &Expression,
         args: &[Expression],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        trace!("      Compiling call...");
         // 1. 预先编译所有参数
         let mut compiled_args = Vec::new();
         for arg in args {
@@ -1635,19 +1696,19 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         // e.g. foo(1) 或 foo#<i32>(1)
         // =========================================================
         if let ExpressionKind::Path(path) = &callee.kind {
-            if let Some(&def_id) = self.analysis.path_resolutions.get(&path.id) {
-                // A. 查 Analyzer 的表，获取该调用使用的泛型实参 (e.g. [i32])
-                // 如果是普通函数，这里就是空的
+            // 【修复】使用 callee.id (Expr ID) 而不是 path.id
+            // Analyzer 的 check_expr 也就是 check_path_expr 是用 expr.id 存的
+            if let Some(&def_id) = self.analysis.path_resolutions.get(&callee.id) {
+                
+                // A. 查表获取泛型实参
                 let generic_args = self.analysis.node_generic_args
                     .get(&callee.id)
                     .cloned()
                     .unwrap_or_default();
 
-                // B. 重建修饰名 (Mangled Name)
-                // e.g. "foo_i32"
+                // ... (后续逻辑不变)
                 let fn_mangled_name = self.analysis.get_mangled_function_name(def_id, &generic_args);
-
-                // C. 查表获取 LLVM Function
+                
                 if let Some(fn_val) = self.functions.get(&fn_mangled_name) {
                     let call_site = self
                         .builder
@@ -1655,8 +1716,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                         .map_err(|_| "Direct call failed")?;
                     return self.handle_call_return(call_site);
                 } else {
-                    // 如果 Analyzer 没问题，这里理论上不应该找不到
-                    panic!("ICE: Function '{}' resolved but not compiled in codegen", fn_mangled_name);
+                    panic!("ICE: Function '{}' not found", fn_mangled_name);
                 }
             }
         }
@@ -1679,6 +1739,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
                 // C. 查表
                 if let Some(fn_val) = self.functions.get(&fn_mangled_name) {
+                    trace!("        Build call to '{}'", fn_mangled_name);
                     let call_site = self
                         .builder
                         .build_call(*fn_val, &compiled_args, "static_call")
@@ -2020,8 +2081,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     // 全局变量编译逻辑
     fn compile_global_variable(&mut self, id: DefId, def: &GlobalDefinition) {
         // 1. 获取类型
-        let ty_key = self.analysis.types.get(&id).unwrap();
-        let llvm_ty = self.compile_type(ty_key).unwrap();
+        let ty_key = self.get_resolved_type(id);
+        let llvm_ty = self.compile_type(&ty_key).unwrap();
 
         // 2. 获取修饰名
         // 如果是 extern，不做 mangle，且不设置 initializer
@@ -2052,9 +2113,9 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             if let Some(init) = &def.initializer {
                 // A: 如果是简单字面量 (String, Float, Bool)，直接编译
                 if let ExpressionKind::Literal(lit) = &init.kind {
-                    let lit_ty = self.analysis.types.get(&init.id).unwrap();
+                    let lit_ty = self.get_resolved_type(init.id);
                     let val = self
-                        .compile_literal(lit, lit_ty)
+                        .compile_literal(lit, &lit_ty)
                         .expect("Literal compile failed");
                     global.set_initializer(&val);
                 }
@@ -2099,16 +2160,11 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     // 辅助函数：编译 sizeof
     fn compile_sizeof(&self, target_type: &Type) -> Result<BasicValueEnum<'ctx>, String> {
         // 1. 从 Analyzer 获取类型键
-        let type_key = self.analysis.types.get(&target_type.id).ok_or_else(|| {
-            format!(
-                "Sizeof target type {:?} not resolved by analyzer",
-                target_type
-            )
-        })?;
+        let type_key = self.get_resolved_type(target_type.id);
 
         // 2. 编译为 LLVM Type
         let llvm_ty = self
-            .compile_type(type_key)
+            .compile_type(&type_key)
             .ok_or_else(|| format!("Cannot compile type {:?} for sizeof", type_key))?;
 
         // 3. 获取大小 (LLVM ConstantExpr)
