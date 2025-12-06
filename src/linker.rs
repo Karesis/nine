@@ -43,7 +43,7 @@ pub fn link_executable(
 
     cmd.arg(obj_path).arg("-o").arg(output_path);
 
-    cmd.arg("--target").arg(&target_triple);
+    cmd.arg("-target").arg(&target_triple);
 
     //? LTO (Link Time Optimization)
     //? -flto -O3
