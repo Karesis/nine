@@ -22,20 +22,23 @@ pub mod parser;
 pub mod source;
 pub mod target;
 pub mod token;
+pub mod linker; 
 
 use crate::analyzer::Analyzer;
 use crate::codegen::CodeGen;
 use crate::diagnostic::emit_diagnostics;
 use crate::driver::Driver;
+use crate::linker::link_executable; 
 use crate::target::TargetMetrics;
-use inkwell::OptimizationLevel;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
 };
+use inkwell::OptimizationLevel;
 use std::error::Error;
 use std::path::{Path, PathBuf};
+use std::fs; 
 
 #[derive(Debug, Clone)]
 pub enum EmitType {
@@ -96,13 +99,20 @@ fn handle_output(module: &Module, config: &CompileConfig) -> Result<(), Box<dyn 
     let output_path = match &config.output_path {
         Some(p) => p.clone(),
         None => {
-            let ext = match config.emit_type {
-                EmitType::LlvmIr => "ll",
-                EmitType::Bitcode => "bc",
-                EmitType::Object => "o",
-                _ => "out",
-            };
-            config.source_path.with_extension(ext)
+            let mut p = config.source_path.clone();
+            match config.emit_type {
+                EmitType::LlvmIr => { p.set_extension("ll"); },
+                EmitType::Bitcode => { p.set_extension("bc"); },
+                EmitType::Object => { p.set_extension("o"); },
+                EmitType::Executable => {
+                    if cfg!(target_os = "windows") {
+                        p.set_extension("exe");
+                    } else {
+                        p.set_extension(""); 
+                    }
+                }
+            }
+            p
         }
     };
 
@@ -116,14 +126,28 @@ fn handle_output(module: &Module, config: &CompileConfig) -> Result<(), Box<dyn 
                 .print_to_file(&output_path)
                 .map_err(|e| e.to_string())?;
         }
+        EmitType::Bitcode => {
+            module.write_bitcode_to_path(&output_path);
+        }
         EmitType::Object => {
             emit_object_file(module, &output_path, &config.target)?;
         }
-        _ => {
-            eprintln!(
-                "Warning: Output type {:?} not yet fully implemented",
-                config.emit_type
-            );
+        EmitType::Executable => {
+            let temp_obj_path = output_path.with_extension("o");
+
+            if config.verbose {
+                println!("Generating temporary object file: {:?}", temp_obj_path);
+            }
+
+            emit_object_file(module, &temp_obj_path, &config.target)?;
+
+            if let Err(e) = link_executable(&temp_obj_path, &output_path, &config.target, config.verbose) {
+                // 如果链接失败，保留 .o 文件可能有助于调试，但通常应该报错
+                return Err(format!("Linking failed: {}", e).into());
+            }
+            if !config.verbose {
+                let _ = fs::remove_file(&temp_obj_path);
+            }
         }
     }
 
@@ -142,6 +166,7 @@ fn emit_object_file(
     module.set_triple(&triple);
 
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
+    
     let target_machine = target
         .create_target_machine(
             &triple,
