@@ -16,7 +16,7 @@
 
   - **Zero-Cost Generics**: Monomorphized generics (`struct#<T>`, `fn#<T>`) allow for powerful abstractions without runtime overhead.
   - **Integrated Toolchain**: Compiles directly to native executables by orchestrating LLVM and Clang automatically.
-  - **Explicit Memory Control**: No Garbage Collection. Manual memory management via `malloc`/`free` with clear pointer semantics (`^T` for raw pointers, `*T` for pointers to structs).
+  - **Explicit Memory Control**: No Garbage Collection. Manual memory management via `malloc`/`free` with clear pointer semantics (`^T` for immutable pointers, `*T` for mutable pointers).
   - **Method Extensions**: Define methods for types using `imp` blocks, supporting both static (`Type::new`) and instance (`obj.method`) syntax.
   - **Predictable Layout**: Precise control over memory layout with `@sizeof` introspection, making it suitable for low-level systems programming.
   - **C Interop**: Seamless FFI with C standard libraries.
