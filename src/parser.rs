@@ -490,11 +490,11 @@ impl<'a> Parser<'a> {
         let mut last_end = first.span.end;
         // 如果有泛型参数，更新结束位置到 '>'
         if let Some(ref args) = first_args {
-             if let Some(last_arg) = args.last() {
-                 // 这里其实应该取 '>' 的位置，但 Parser helper 里 generic args 已经吃掉了 '>'
-                 // 我们可以用 previous_span 获取 '>' 的位置
-                 last_end = self.previous_span().end; 
-             }
+            if let Some(last_arg) = args.last() {
+                // 这里其实应该取 '>' 的位置，但 Parser helper 里 generic args 已经吃掉了 '>'
+                // 我们可以用 previous_span 获取 '>' 的位置
+                last_end = self.previous_span().end;
+            }
         }
 
         segments.push(PathSegment {
@@ -510,7 +510,7 @@ impl<'a> Parser<'a> {
 
             let mut seg_end = seg.span.end;
             if let Some(_) = seg_args {
-                 seg_end = self.previous_span().end;
+                seg_end = self.previous_span().end;
             }
 
             segments.push(PathSegment {
@@ -538,8 +538,12 @@ impl<'a> Parser<'a> {
     // src/parser.rs
 
     fn parse_generic_params(&mut self) -> ParseResult<Vec<GenericParam>> {
-        if !self.check(TokenKind::Hash) { return Ok(Vec::new()); }
-        if !self.check_nth(1, TokenKind::Lt) { return Ok(Vec::new()); }
+        if !self.check(TokenKind::Hash) {
+            return Ok(Vec::new());
+        }
+        if !self.check_nth(1, TokenKind::Lt) {
+            return Ok(Vec::new());
+        }
 
         self.advance(); // #
         self.expect(TokenKind::Lt)?; // <
@@ -603,7 +607,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::Lt)?; // '<'
 
         let mut args = Vec::new();
-        
+
         // 循环条件：增加 && !self.check(TokenKind::Shr)
         while !self.check(TokenKind::Gt) && !self.check(TokenKind::Shr) && !self.is_at_end() {
             args.push(self.parse_type()?);
@@ -614,8 +618,8 @@ impl<'a> Parser<'a> {
         }
 
         // 【修改 2】使用新函数来结束泛型实参列表
-        self.consume_generic_closer()?; 
-        
+        self.consume_generic_closer()?;
+
         Ok(Some(args))
     }
 
@@ -637,7 +641,7 @@ impl<'a> Parser<'a> {
             token.kind = TokenKind::Gt;
             // 修改 span: 比如原来是 10..12 (长度2)，现在变成 10..11 (长度1)
             let original_end = token.span.end;
-            token.span.end -= 1; 
+            token.span.end -= 1;
 
             // 3. 凭空制造第二个 Gt Token
             let second_gt = Token {
@@ -648,20 +652,20 @@ impl<'a> Parser<'a> {
             // 4. 【魔法】把第二个 Gt 塞回 TokenStream 的缓冲区头部
             // 这样下一次 peek/advance 就会看到这个新的 Gt
             self.stream.buffer.push_front(second_gt);
-            
+
             // 修正 Parser 记录的 previous_kind，防止 synchronize 误判
             self.previous_kind = TokenKind::Gt;
 
             return Ok(token);
         }
-        
+
         // 还可以支持 '>>>' 或 '>=' 等，如果需要的话
         // 目前只处理 >> 即可
 
         // 如果都不是，报错
         self.expect(TokenKind::Gt)
     }
-    
+
     // 辅助：把 self.advance() 稍微包装一下以配合上面的 Result 返回值签名
     // (你原来的 advance 返回 Token，expect 返回 Result<Token>)
     fn advance_with_check(&mut self) -> ParseResult<Token> {
@@ -1108,7 +1112,8 @@ impl<'a> Parser<'a> {
                     // 将 self 视为名为 "self" 的 Path
                     kind: ExpressionKind::Path(Path {
                         id: self.next_id(),
-                        segments: vec![PathSegment { // <--- 修改：构造 PathSegment
+                        segments: vec![PathSegment {
+                            // <--- 修改：构造 PathSegment
                             name: "self".to_string(),
                             generic_args: None, // self 本身通常不带泛型参数
                             span: tok.span,
@@ -1944,9 +1949,9 @@ impl<'a> Parser<'a> {
         // 1. Header 部分
         let alignment = self.parse_optional_alignment()?;
         let name = self.parse_identifier()?;
-        
+
         // <--- 插入点：解析泛型参数 definition --->
-        let generics = self.parse_generic_params()?; 
+        let generics = self.parse_generic_params()?;
 
         // 2. Body 部分 (使用通用解析器)
         let (fields, static_methods, body_span) = self.parse_mixed_body(|p| {
@@ -2080,10 +2085,13 @@ impl<'a> Parser<'a> {
 
         let mut methods = Vec::new();
         while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-            
             let is_method_pub = self.match_token(&[TokenKind::Pub]);
-            let fn_start = if is_method_pub { self.previous_span().start } else { self.peek().span.start };
-            
+            let fn_start = if is_method_pub {
+                self.previous_span().start
+            } else {
+                self.peek().span.start
+            };
+
             methods.push(self.parse_function_definition(
                 is_method_pub,
                 false, // is_extern
@@ -2110,7 +2118,7 @@ impl<'a> Parser<'a> {
     // TypeImpDecl -> "imp" "for" Type "{" { MethodDecl } "}"
     fn parse_imp_decl(&mut self, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Imp)?;
-        
+
         // <--- 插入点：解析 imp 自身的泛型参数 (imp#<T> for ...) --->
         let generics = self.parse_generic_params()?;
 
@@ -2124,8 +2132,12 @@ impl<'a> Parser<'a> {
         let mut methods = Vec::new();
         while !self.check(TokenKind::RBrace) && !self.is_at_end() {
             let is_pub = self.match_token(&[TokenKind::Pub]);
-            let fn_start = if is_pub { self.previous_span().start } else { self.peek().span.start };
-            
+            let fn_start = if is_pub {
+                self.previous_span().start
+            } else {
+                self.peek().span.start
+            };
+
             methods.push(self.parse_function_definition(
                 is_pub,
                 false,
@@ -2139,7 +2151,7 @@ impl<'a> Parser<'a> {
         Ok(Item {
             id: self.next_id(),
             kind: ItemKind::Implementation {
-                generics, // <--- 存入
+                generics,         // <--- 存入
                 implements: None, // 目前没有 Trait/Cap 实现，只是 imp for Type
                 target_type,
                 methods,

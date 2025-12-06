@@ -27,18 +27,18 @@ pub type DefId = NodeId;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeKey {
     Primitive(PrimitiveType),
-    
+
     // 修改：Named 改为 Instantiated
     // 既代表普通结构体 (args 为空)，也代表泛型实例 List<i32>
     // DefId 指向 StructDecl / EnumDecl / Typedef
     Instantiated {
         def_id: DefId,
-        args: Vec<TypeKey>, 
+        args: Vec<TypeKey>,
     },
 
     // 新增：泛型占位符 (例如 T)
     // DefId 指向 AST 中的 GenericParam 节点
-    GenericParam(DefId), 
+    GenericParam(DefId),
 
     Pointer(Box<TypeKey>, Mutability),
     Array(Box<TypeKey>, u64),
@@ -47,7 +47,7 @@ pub enum TypeKey {
         ret: Option<Box<TypeKey>>,
         is_variadic: bool,
     },
-    
+
     IntegerLiteral(u64),
     FloatLiteral(u64),
     Error,
@@ -70,8 +70,8 @@ impl TypeKey {
             TypeKey::Pointer(inner, _) => inner.is_concrete(),
             TypeKey::Array(inner, _) => inner.is_concrete(),
             TypeKey::Function { params, ret, .. } => {
-                params.iter().all(|p| p.is_concrete()) && 
-                ret.as_ref().map_or(true, |r| r.is_concrete())
+                params.iter().all(|p| p.is_concrete())
+                    && ret.as_ref().map_or(true, |r| r.is_concrete())
             }
             _ => true,
         }
@@ -188,7 +188,7 @@ impl AnalysisContext {
             concrete_functions: HashSet::new(),
             instantiated_structs: HashMap::new(),
             non_generic_functions: HashSet::new(),
-            node_generic_args: HashMap::new(),   
+            node_generic_args: HashMap::new(),
             target,
         }
     }
@@ -204,7 +204,12 @@ impl AnalysisContext {
     /// 泛型替换：将类型中的泛型参数 (T) 替换为具体的实参 (args)
     /// generic_def_id: 定义泛型的结构体/函数的 ID (用于查找 T 是第几个参数)
     /// args: 具体的实参列表 (如 [i32])
-    pub fn substitute_generics(&self, ty: &TypeKey, generic_def_id: DefId, args: &[TypeKey]) -> TypeKey {
+    pub fn substitute_generics(
+        &self,
+        ty: &TypeKey,
+        generic_def_id: DefId,
+        args: &[TypeKey],
+    ) -> TypeKey {
         match ty {
             // 1. 遇到泛型参数 T
             TypeKey::GenericParam(param_id) => {
@@ -218,7 +223,7 @@ impl AnalysisContext {
                     }
                 }
                 // 没找到或者越界？返回原样 (理论上不应发生，除非编译器 Bug)
-                ty.clone() 
+                ty.clone()
             }
 
             // 2. 递归替换内部类型
@@ -226,29 +231,46 @@ impl AnalysisContext {
                 let new_inner = self.substitute_generics(inner, generic_def_id, args);
                 TypeKey::Pointer(Box::new(new_inner), *mutability)
             }
-            
+
             TypeKey::Array(inner, size) => {
                 let new_inner = self.substitute_generics(inner, generic_def_id, args);
                 TypeKey::Array(Box::new(new_inner), *size)
             }
 
             // 3. 处理嵌套泛型实例: List<T> -> List<i32>
-            TypeKey::Instantiated { def_id, args: inner_args } => {
-                let new_args = inner_args.iter()
+            TypeKey::Instantiated {
+                def_id,
+                args: inner_args,
+            } => {
+                let new_args = inner_args
+                    .iter()
                     .map(|a| self.substitute_generics(a, generic_def_id, args))
                     .collect();
-                TypeKey::Instantiated { def_id: *def_id, args: new_args }
+                TypeKey::Instantiated {
+                    def_id: *def_id,
+                    args: new_args,
+                }
             }
 
             // 4. 函数指针
-            TypeKey::Function { params, ret, is_variadic } => {
-                let new_params = params.iter()
+            TypeKey::Function {
+                params,
+                ret,
+                is_variadic,
+            } => {
+                let new_params = params
+                    .iter()
                     .map(|p| self.substitute_generics(p, generic_def_id, args))
                     .collect();
-                let new_ret = ret.as_ref()
+                let new_ret = ret
+                    .as_ref()
                     .map(|r| Box::new(self.substitute_generics(r, generic_def_id, args)));
-                
-                TypeKey::Function { params: new_params, ret: new_ret, is_variadic: *is_variadic }
+
+                TypeKey::Function {
+                    params: new_params,
+                    ret: new_ret,
+                    is_variadic: *is_variadic,
+                }
             }
 
             // 基础类型不变
@@ -261,26 +283,25 @@ impl AnalysisContext {
     pub fn get_mangling_type_name(&self, ty: &TypeKey) -> String {
         match ty {
             // 基础类型直接转字符串
-            TypeKey::Primitive(p) => format!("{:?}", p), 
+            TypeKey::Primitive(p) => format!("{:?}", p),
 
             // 实例化的类型 (List<i32>)
             TypeKey::Instantiated { def_id, args } => {
                 // 1. 查表获取基础名字 (e.g. "std_collections_List")
                 // 我们在 scan_declarations 阶段已经填好了 mangled_names
-                let base_name = self.mangled_names.get(def_id)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        // 理论上只要 scan_decl 跑过，这里一定有值
-                        // 除非是匿名类型或其他边缘情况
-                        format!("Struct_{}", def_id.0) 
-                    });
+                let base_name = self.mangled_names.get(def_id).cloned().unwrap_or_else(|| {
+                    // 理论上只要 scan_decl 跑过，这里一定有值
+                    // 除非是匿名类型或其他边缘情况
+                    format!("Struct_{}", def_id.0)
+                });
 
                 if args.is_empty() {
                     base_name
                 } else {
                     // 2. 递归拼接泛型参数
                     // List<i32, f64> -> List_I32_F64
-                    let args_str: Vec<String> = args.iter()
+                    let args_str: Vec<String> = args
+                        .iter()
                         .map(|arg| self.get_mangling_type_name(arg))
                         .collect();
                     format!("{}_{}", base_name, args_str.join("_"))
@@ -289,13 +310,16 @@ impl AnalysisContext {
 
             // 指针类型
             TypeKey::Pointer(inner, _) => format!("Ptr_{}", self.get_mangling_type_name(inner)),
-            
+
             // 数组类型
-            TypeKey::Array(inner, size) => format!("Arr_{}_{}", size, self.get_mangling_type_name(inner)),
+            TypeKey::Array(inner, size) => {
+                format!("Arr_{}_{}", size, self.get_mangling_type_name(inner))
+            }
 
             // 函数指针 (稍微复杂点，把参数全拼起来)
             TypeKey::Function { params, ret, .. } => {
-                let params_str: Vec<String> = params.iter()
+                let params_str: Vec<String> = params
+                    .iter()
                     .map(|p| self.get_mangling_type_name(p))
                     .collect();
                 let ret_str = if let Some(r) = ret {
@@ -317,14 +341,17 @@ impl AnalysisContext {
 
     // 统一生成泛型函数的修饰名
     pub fn get_mangled_function_name(&self, def_id: DefId, args: &[TypeKey]) -> String {
-        let base_name = self.mangled_names.get(&def_id)
+        let base_name = self
+            .mangled_names
+            .get(&def_id)
             .cloned()
             .unwrap_or_else(|| format!("Fn{}", def_id.0)); // Fallback
 
         if args.is_empty() {
             base_name
         } else {
-            let args_str: Vec<String> = args.iter()
+            let args_str: Vec<String> = args
+                .iter()
                 .map(|a| self.get_mangling_type_name(a))
                 .collect();
             format!("{}_{}", base_name, args_str.join("_"))
@@ -343,18 +370,18 @@ impl AnalysisContext {
             // 只要 DefId 相同，我们就认为兼容（参数不同没关系，因为一个是i32，一个是T）
             (TypeKey::Instantiated { def_id: a, .. }, TypeKey::Instantiated { def_id: b, .. }) => {
                 a == b
-            },
+            }
 
             // 3. 递归情况：指针 vs 指针
             // 比如 *List<i32> vs *List<T>
             (TypeKey::Pointer(inner_a, mut_a), TypeKey::Pointer(inner_b, mut_b)) => {
                 mut_a == mut_b && self.are_types_compatible(inner_a, inner_b)
-            },
+            }
 
             // 4. 递归情况：数组
             (TypeKey::Array(inner_a, size_a), TypeKey::Array(inner_b, size_b)) => {
                 size_a == size_b && self.are_types_compatible(inner_a, inner_b)
-            },
+            }
 
             _ => false,
         }
@@ -478,21 +505,27 @@ impl Analyzer {
                     };
                     // 1. 注册符号 "Iterable"
                     self.define_symbol(def.name.name.clone(), item.id, vis, def.name.span);
-                    
+
                     // 2. 注册类型 (Cap 本身也是一种类型，可以作为变量类型)
                     self.record_type(item.id, TypeKey::non_generic(item.id));
                 }
 
                 // --- 结构体 ---
                 ItemKind::StructDecl(def) => {
-                    let vis = if def.is_pub { Visibility::Public } else { Visibility::Private };
+                    let vis = if def.is_pub {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
                     self.define_symbol(def.name.name.clone(), item.id, vis, def.name.span);
 
                     // 1. 提取结构体的泛型参数 ID (例如 Pair<T, U>)
                     let param_ids: Vec<DefId> = def.generics.iter().map(|g| g.id).collect();
-                    
+
                     // 2. 记录结构体自己的泛型
-                    self.ctx.def_generic_params.insert(item.id, param_ids.clone());
+                    self.ctx
+                        .def_generic_params
+                        .insert(item.id, param_ids.clone());
 
                     // 3. 标记泛型参数 ID (供 resolve_ast_type 识别 T)
                     for param_id in &param_ids {
@@ -507,24 +540,34 @@ impl Analyzer {
                         // 如果方法自己没有泛型 (fn new())，它必须继承结构体的泛型 (Pair<T>)
                         // 否则 Analyzer 会以为它是个普通函数
                         if method.generics.is_empty() {
-                             self.ctx.def_generic_params.insert(method.id, param_ids.clone());
+                            self.ctx
+                                .def_generic_params
+                                .insert(method.id, param_ids.clone());
                         } else {
                             // 如果方法也有泛型 (fn foo<V>)，需要合并 [T, U, V]，这里暂略，先处理继承情况
                         }
                     }
-                    
+
                     // 注册方法符号
                     self.register_static_methods(item.id, &def.static_methods);
                 }
 
                 // --- 联合体 (逻辑同上) ---
                 ItemKind::UnionDecl(def) => {
-                    let vis = if def.is_pub { Visibility::Public } else { Visibility::Private };
+                    let vis = if def.is_pub {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
                     self.define_symbol(def.name.name.clone(), item.id, vis, def.name.span);
 
                     let param_ids: Vec<DefId> = def.generics.iter().map(|g| g.id).collect();
-                    self.ctx.def_generic_params.insert(item.id, param_ids.clone());
-                    for param_id in param_ids { self.ctx.generic_param_defs.insert(param_id); }
+                    self.ctx
+                        .def_generic_params
+                        .insert(item.id, param_ids.clone());
+                    for param_id in param_ids {
+                        self.ctx.generic_param_defs.insert(param_id);
+                    }
 
                     self.record_type(item.id, TypeKey::non_generic(item.id));
                     // 1. 判断枚举本身是否是非泛型的
@@ -542,40 +585,56 @@ impl Analyzer {
 
                 // --- 枚举 ---
                 ItemKind::EnumDecl(def) => {
-                    let vis = if def.is_pub { Visibility::Public } else { Visibility::Private };
+                    let vis = if def.is_pub {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
                     self.define_symbol(def.name.name.clone(), item.id, vis, def.name.span);
 
                     // 【核心补充】枚举也有泛型
                     let param_ids: Vec<DefId> = def.generics.iter().map(|g| g.id).collect();
-                    self.ctx.def_generic_params.insert(item.id, param_ids.clone());
-                    for param_id in param_ids { self.ctx.generic_param_defs.insert(param_id); }
+                    self.ctx
+                        .def_generic_params
+                        .insert(item.id, param_ids.clone());
+                    for param_id in param_ids {
+                        self.ctx.generic_param_defs.insert(param_id);
+                    }
 
                     self.record_type(item.id, TypeKey::non_generic(item.id));
 
                     // ... (Scope 和 Variant 的注册逻辑保持不变，不需要改动) ...
                     let mut enum_scope = Scope::new(ScopeKind::Module);
                     for variant in &def.variants {
-                        enum_scope.symbols.insert(variant.name.name.clone(), (variant.id, Visibility::Public));
+                        enum_scope
+                            .symbols
+                            .insert(variant.name.name.clone(), (variant.id, Visibility::Public));
                     }
                     for method in &def.static_methods {
-                        let m_vis = if method.is_pub { Visibility::Public } else { Visibility::Private };
+                        let m_vis = if method.is_pub {
+                            Visibility::Public
+                        } else {
+                            Visibility::Private
+                        };
                         if enum_scope.symbols.contains_key(&method.name.name) {
                             self.error(format!("Duplicate..."), method.span);
                         } else {
-                            enum_scope.symbols.insert(method.name.name.clone(), (method.id, m_vis));
+                            enum_scope
+                                .symbols
+                                .insert(method.name.name.clone(), (method.id, m_vis));
                         }
                     }
                     self.ctx.namespace_scopes.insert(item.id, enum_scope);
                 }
 
                 // --- 函数 ---
-               ItemKind::FunctionDecl(def) => {
+                ItemKind::FunctionDecl(def) => {
                     let vis = if def.is_pub {
                         Visibility::Public
                     } else {
                         Visibility::Private
                     };
-                    
+
                     // 【核心修复】
                     // 使用 def.id (函数定义的ID) 而不是 item.id (外层包装的ID)
                     // 这样才能和 resolve_signatures 里的 record_type 对应上！
@@ -583,8 +642,10 @@ impl Analyzer {
 
                     // 泛型参数表也要用 def.id
                     let param_ids: Vec<DefId> = def.generics.iter().map(|g| g.id).collect();
-                    self.ctx.def_generic_params.insert(def.id, param_ids.clone());
-                    
+                    self.ctx
+                        .def_generic_params
+                        .insert(def.id, param_ids.clone());
+
                     // 标记泛型参数 ID
                     for param_id in param_ids {
                         self.ctx.generic_param_defs.insert(param_id);
@@ -594,7 +655,7 @@ impl Analyzer {
                     if def.generics.is_empty() {
                         self.ctx.non_generic_functions.insert(def.id);
                     }
-                    
+
                     // Mangled name 也要用 def.id
                     let mangled = if def.is_extern {
                         def.name.name.clone()
@@ -718,8 +779,10 @@ impl Analyzer {
 
         // [DEBUG] 打印当前正在注册的泛型
         if !generics.is_empty() {
-            eprintln!("[DEBUG] Entering Generic Scope. Generics: {:?}", 
-                generics.iter().map(|g| &g.name.name).collect::<Vec<_>>());
+            eprintln!(
+                "[DEBUG] Entering Generic Scope. Generics: {:?}",
+                generics.iter().map(|g| &g.name.name).collect::<Vec<_>>()
+            );
         }
 
         for param in generics {
@@ -727,8 +790,10 @@ impl Analyzer {
             self.ctx.generic_param_defs.insert(param.id);
 
             // [DEBUG] 打印具体的 ID 注册信息
-            eprintln!("[DEBUG]   -> Registering Generic Param '{}' (ID: {:?})", 
-                param.name.name, param.id);
+            eprintln!(
+                "[DEBUG]   -> Registering Generic Param '{}' (ID: {:?})",
+                param.name.name, param.id
+            );
 
             // 3. 在当前作用域注册 T (这样结构体内部才能引用 T)
             self.define_symbol(
@@ -741,34 +806,37 @@ impl Analyzer {
             // 4. 【关键】解析约束 (Constraints)
             // T: Printable + Clone
             let mut constraint_keys = Vec::new();
-            
+
             // 遍历 Path 列表
             for constraint_path in &param.constraints {
                 // 直接使用 resolve_path！
                 if let Some(def_id) = self.resolve_path(constraint_path) {
-                    
                     // 找到了 Cap 定义，把它转为 TypeKey::non_generic 存起来
                     // 如果 Cap 本身带泛型 (Iterable#<i32>)，resolve_ast_type 其实更合适，
                     // 但这里我们先简单处理为 Named。
                     // 为了支持带泛型的约束 (e.g. T: Iterable#<i32>)，
                     // 我们其实应该调用 self.resolve_ast_type_from_path(constraint_path)
                     // 但为了不引入太多变动，目前先只取 def_id。
-                    
+
                     // 稍微 Hack 一下：如果约束是带泛型的 Path，我们最好把它当做 Type 解析
                     // 既然我们只是存 ID 给后续检查用，这里先只存 DefId 对应的 TypeKey
                     constraint_keys.push(TypeKey::non_generic(def_id));
-                    
                 } else {
                     self.error(
-                        format!("Unknown capability constraint: {:?}", constraint_path.segments.last().unwrap().name),
-                        constraint_path.span
+                        format!(
+                            "Unknown capability constraint: {:?}",
+                            constraint_path.segments.last().unwrap().name
+                        ),
+                        constraint_path.span,
                     );
                 }
             }
 
             // 5. 存入 Context
             if !constraint_keys.is_empty() {
-                self.ctx.generic_constraints.insert(param.id, constraint_keys);
+                self.ctx
+                    .generic_constraints
+                    .insert(param.id, constraint_keys);
             }
         }
     }
@@ -849,7 +917,9 @@ impl Analyzer {
                         // 【关键】告诉 Analyzer：这个方法拥有泛型参数！
                         // 这样 try_record_function_instantiation 才会把它当做泛型函数处理
                         if method.generics.is_empty() {
-                            self.ctx.def_generic_params.insert(method.id, param_ids.clone());
+                            self.ctx
+                                .def_generic_params
+                                .insert(method.id, param_ids.clone());
                         }
                     }
 
@@ -917,12 +987,14 @@ impl Analyzer {
                     for field in &def.fields {
                         let ty = self.resolve_ast_type(&field.ty);
                         fields.insert(field.name.name.clone(), ty.clone());
-                        
+
                         // 存入 (Name, Type)
                         field_order_list.push((field.name.name.clone(), ty));
                     }
                     self.ctx.struct_fields.insert(item.id, fields);
-                    self.ctx.struct_definitions.insert(item.id, field_order_list);
+                    self.ctx
+                        .struct_definitions
+                        .insert(item.id, field_order_list);
 
                     // 3. 解析静态方法
                     for method in &def.static_methods {
@@ -936,7 +1008,7 @@ impl Analyzer {
                 ItemKind::EnumDecl(def) => {
                     self.enter_generic_scope(&def.generics); // <--- 加入这行
 
-                    let enum_type = TypeKey::non_generic(item.id); 
+                    let enum_type = TypeKey::non_generic(item.id);
                     for variant in &def.variants {
                         self.record_type(variant.id, enum_type.clone());
                     }
@@ -956,7 +1028,7 @@ impl Analyzer {
                             param.name.name.clone(),
                             param.id,
                             Visibility::Private,
-                            param.span
+                            param.span,
                         );
                     }
 
@@ -975,28 +1047,33 @@ impl Analyzer {
                     self.exit_scope(); // <--- 退出
                 }
 
-                ItemKind::Implementation { generics, target_type, methods, .. } => {
-                     self.enter_scope(ScopeKind::Generic);
-                     // 1. 注册 imp<T> 的 T
-                     for param in generics {
+                ItemKind::Implementation {
+                    generics,
+                    target_type,
+                    methods,
+                    ..
+                } => {
+                    self.enter_scope(ScopeKind::Generic);
+                    // 1. 注册 imp<T> 的 T
+                    for param in generics {
                         self.ctx.generic_param_defs.insert(param.id);
                         self.define_symbol(
                             param.name.name.clone(),
                             param.id,
                             Visibility::Private,
-                            param.span
+                            param.span,
                         );
-                     }
-                     
-                     // 2. 解析 Target Type (e.g. Box<T>)
-                     // 因为 T 已经在 scope 里了，resolve_ast_type 能正确处理 Box<T>
-                     let _ = self.resolve_ast_type(target_type);
-                     
-                     for method in methods {
+                    }
+
+                    // 2. 解析 Target Type (e.g. Box<T>)
+                    // 因为 T 已经在 scope 里了，resolve_ast_type 能正确处理 Box<T>
+                    let _ = self.resolve_ast_type(target_type);
+
+                    for method in methods {
                         self.resolve_function_signature(method);
-                     }
-                     
-                     self.exit_scope();
+                    }
+
+                    self.exit_scope();
                 }
 
                 ItemKind::GlobalVariable(def) => {
@@ -1148,7 +1225,9 @@ impl Analyzer {
                     }
                 }
                 ItemKind::FunctionDecl(func) => self.check_function(func),
-                ItemKind::Implementation { generics, methods, .. } => {
+                ItemKind::Implementation {
+                    generics, methods, ..
+                } => {
                     self.enter_generic_scope(generics);
                     for method in methods {
                         self.check_function(method);
@@ -1446,9 +1525,7 @@ impl Analyzer {
                 Literal::Char(_) => TypeKey::Primitive(PrimitiveType::I32),
             },
 
-            ExpressionKind::Path(path) => {
-                self.check_path_expr(path, expr.id)
-            }
+            ExpressionKind::Path(path) => self.check_path_expr(path, expr.id),
 
             ExpressionKind::Binary { lhs, op, rhs } => {
                 let lhs_ty = self.check_expr(lhs);
@@ -1529,7 +1606,6 @@ impl Analyzer {
             ExpressionKind::StructLiteral { type_name, fields } => {
                 // 1. 解析结构体名称拿到 DefId
                 if let Some(def_id) = self.resolve_path(type_name) {
-                    
                     // 2. 解析泛型实参 (e.g., Box#<i32>)
                     let mut type_args = Vec::new();
                     if let Some(last_seg) = type_name.segments.last() {
@@ -1541,9 +1617,9 @@ impl Analyzer {
                     }
 
                     // 3. 构造完整的类型键 (Instantiated)
-                    let struct_type = TypeKey::Instantiated { 
-                        def_id, 
-                        args: type_args.clone() // 后面替换时要用到 args
+                    let struct_type = TypeKey::Instantiated {
+                        def_id,
+                        args: type_args.clone(), // 后面替换时要用到 args
                     };
 
                     // 4. 检查这是否真的是一个结构体定义
@@ -1559,17 +1635,21 @@ impl Analyzer {
                         let field_name = &init.field_name.name;
 
                         // B. 查找定义中的字段类型 (可能是泛型 T)
-                        let raw_field_ty_opt = self.ctx.struct_fields.get(&def_id)
+                        let raw_field_ty_opt = self
+                            .ctx
+                            .struct_fields
+                            .get(&def_id)
                             .and_then(|fs| fs.get(field_name));
 
                         if let Some(raw_ty) = raw_field_ty_opt {
                             // C. 【关键步骤】执行泛型替换！
                             // 如果 raw_ty 是 T，且 args 是 [i32]，则 expected_ty 变为 i32
-                            let expected_ty = self.ctx.substitute_generics(raw_ty, def_id, &type_args);
+                            let expected_ty =
+                                self.ctx.substitute_generics(raw_ty, def_id, &type_args);
 
                             // D. 检查类型匹配
                             self.check_type_match(&expected_ty, &actual_ty, init.value.span);
-                            
+
                             // E. 固化字面量类型 (如果赋值的是 10，这里确定它是 i32)
                             self.coerce_literal_type(init.value.id, &expected_ty, &actual_ty);
                         } else {
@@ -1582,7 +1662,7 @@ impl Analyzer {
 
                     // 6. 记录整个表达式的类型
                     self.record_type(expr.id, struct_type.clone());
-                    
+
                     // 7. 返回类型
                     struct_type
                 } else {
@@ -1591,18 +1671,21 @@ impl Analyzer {
                 }
             }
 
-            ExpressionKind::FieldAccess { receiver, field_name } => {
+            ExpressionKind::FieldAccess {
+                receiver,
+                field_name,
+            } => {
                 let receiver_type = self.check_expr(receiver);
-                
+
                 // 解构 Instantiated，拿到 def_id 和 args
                 if let TypeKey::Instantiated { def_id, args } = receiver_type {
                     if let Some(fields) = self.ctx.struct_fields.get(&def_id) {
                         if let Some(raw_field_ty) = fields.get(&field_name.name) {
-                            
                             // obj 是 Box<i32> (args=[i32])，字段是 val: T
                             // 这里算出 val 的类型是 i32
-                            let actual_field_ty = self.ctx.substitute_generics(raw_field_ty, def_id, &args);
-                            
+                            let actual_field_ty =
+                                self.ctx.substitute_generics(raw_field_ty, def_id, &args);
+
                             self.record_type(expr.id, actual_field_ty.clone());
                             actual_field_ty
                         } else {
@@ -1704,9 +1787,11 @@ impl Analyzer {
                 }
             }
 
-            ExpressionKind::MethodCall { receiver, method_name, arguments } => {
-                self.check_method_call_dispatch(expr.id, receiver, method_name, arguments)
-            }
+            ExpressionKind::MethodCall {
+                receiver,
+                method_name,
+                arguments,
+            } => self.check_method_call_dispatch(expr.id, receiver, method_name, arguments),
 
             ExpressionKind::Index { target, index } => {
                 // 1. 递归检查目标（数组）
@@ -1773,7 +1858,10 @@ impl Analyzer {
                     }
                     _ => {
                         self.error(
-                            format!("Expected Struct/Enum type for '::' access, found {:?}", target_ty),
+                            format!(
+                                "Expected Struct/Enum type for '::' access, found {:?}",
+                                target_ty
+                            ),
                             target.span,
                         );
                         return TypeKey::Error;
@@ -1781,7 +1869,8 @@ impl Analyzer {
                 };
 
                 // 2. 查找成员
-                let symbol_info = if let Some(scope) = self.ctx.namespace_scopes.get(&container_id) {
+                let symbol_info = if let Some(scope) = self.ctx.namespace_scopes.get(&container_id)
+                {
                     scope.symbols.get(&member.name).cloned()
                 } else {
                     None
@@ -1800,25 +1889,31 @@ impl Analyzer {
 
                     // 获取原始类型 (e.g. fn(T, U) -> Pair<T, U>)
                     if let Some(raw_ty) = self.get_type_of_def(def_id) {
-                        
                         // [DEBUG] 打印原始类型
-                        eprintln!("check_expr: ExpressionKind::StaticAccess [DEBUG] StaticAccess Raw Type: {:?}", raw_ty);
+                        eprintln!(
+                            "check_expr: ExpressionKind::StaticAccess [DEBUG] StaticAccess Raw Type: {:?}",
+                            raw_ty
+                        );
 
                         // 3. 【核心】执行泛型替换
                         // 只有当 Target 是泛型实例 (Pair<i32>) 时才替换
                         if let TypeKey::Instantiated { args, .. } = &target_ty {
-                             if !args.is_empty() {
-                                 // 注意：container_id 就是 Struct DefId
-                                 let concrete_ty = self.ctx.substitute_generics(&raw_ty, container_id, args);
-                                 
-                                 // [DEBUG] 打印替换后的类型 (关键！)
-                                 eprintln!("check_expr: ExpressionKind::StaticAccess [DEBUG]   -> Substituted Type: {:?}", concrete_ty);
+                            if !args.is_empty() {
+                                // 注意：container_id 就是 Struct DefId
+                                let concrete_ty =
+                                    self.ctx.substitute_generics(&raw_ty, container_id, args);
 
-                                 self.record_type(expr.id, concrete_ty.clone());
-                                 return concrete_ty;
-                             }
+                                // [DEBUG] 打印替换后的类型 (关键！)
+                                eprintln!(
+                                    "check_expr: ExpressionKind::StaticAccess [DEBUG]   -> Substituted Type: {:?}",
+                                    concrete_ty
+                                );
+
+                                self.record_type(expr.id, concrete_ty.clone());
+                                return concrete_ty;
+                            }
                         }
-                        
+
                         // 如果不需要替换 (普通结构体)，直接返回
                         self.record_type(expr.id, raw_ty.clone());
                         raw_ty
@@ -1827,10 +1922,7 @@ impl Analyzer {
                     }
                 } else {
                     if self.ctx.namespace_scopes.contains_key(&container_id) {
-                        self.error(
-                            format!("Member '{}' not found", member.name),
-                            member.span,
-                        );
+                        self.error(format!("Member '{}' not found", member.name), member.span);
                     } else {
                         self.error("Type has no static members", target.span);
                     }
@@ -1965,30 +2057,39 @@ impl Analyzer {
 
     /// 1. MethodCall 总入口
     fn check_method_call_dispatch(
-        &mut self, 
+        &mut self,
         expr_id: NodeId,
-        receiver: &Expression, 
-        method_name: &Identifier, 
-        arguments: &[Expression]
+        receiver: &Expression,
+        method_name: &Identifier,
+        arguments: &[Expression],
     ) -> TypeKey {
         // A. 先检查 Receiver 的类型
         let receiver_type = self.check_expr(receiver);
-        if let TypeKey::Error = receiver_type { return TypeKey::Error; }
+        if let TypeKey::Error = receiver_type {
+            return TypeKey::Error;
+        }
 
         // B. 尝试路径 1：标准方法调用 (impl MyStruct { fn foo() })
-        if let Some(ty) = self.check_standard_method_call(expr_id, &receiver_type, method_name, arguments) {
+        if let Some(ty) =
+            self.check_standard_method_call(expr_id, &receiver_type, method_name, arguments)
+        {
             return ty;
         }
 
         // C. 尝试路径 2：函数指针字段调用 (struct A { foo: fn() })
-        if let Some(ty) = self.check_field_fn_ptr_call(expr_id, &receiver_type, method_name, arguments) {
+        if let Some(ty) =
+            self.check_field_fn_ptr_call(expr_id, &receiver_type, method_name, arguments)
+        {
             return ty;
         }
 
         // D. 都失败了
         self.error(
-            format!("Method or Field '{}' not found on type {:?}", method_name.name, receiver_type), 
-            method_name.span
+            format!(
+                "Method or Field '{}' not found on type {:?}",
+                method_name.name, receiver_type
+            ),
+            method_name.span,
         );
         TypeKey::Error
     }
@@ -1999,7 +2100,7 @@ impl Analyzer {
         expr_id: NodeId,
         receiver_type: &TypeKey,
         method_name: &Identifier,
-        arguments: &[Expression]
+        arguments: &[Expression],
     ) -> Option<TypeKey> {
         // 1. 查找方法定义
         let method_info = self.find_method_in_registry(receiver_type, &method_name.name)?;
@@ -2009,35 +2110,46 @@ impl Analyzer {
         combined_args.extend(self.ctx.extract_generic_args(receiver_type));
 
         if !combined_args.is_empty() {
-            self.ctx.node_generic_args.insert(expr_id, combined_args.clone());
+            self.ctx
+                .node_generic_args
+                .insert(expr_id, combined_args.clone());
             self.try_record_instantiation_with_args(method_info.def_id, &combined_args);
         }
 
         // 3. 检查参数与返回值
         // 获取原始签名
-        if let Some(TypeKey::Function { params, ret, .. }) = self.ctx.types.get(&method_info.def_id).cloned() {
+        if let Some(TypeKey::Function { params, ret, .. }) =
+            self.ctx.types.get(&method_info.def_id).cloned()
+        {
             // params[0] 是 self
             let expected_args = if params.is_empty() { &[] } else { &params[1..] };
 
             if expected_args.len() != arguments.len() {
                 self.error(
-                    format!("Method expects {} arguments, got {}", expected_args.len(), arguments.len()),
-                    method_name.span
+                    format!(
+                        "Method expects {} arguments, got {}",
+                        expected_args.len(),
+                        arguments.len()
+                    ),
+                    method_name.span,
                 );
             }
 
             for (arg_expr, param_ty) in arguments.iter().zip(expected_args.iter()) {
                 let arg_actual = self.check_expr(arg_expr);
-                
+
                 // 执行泛型替换 (T -> i32)
-                let expected_concrete_ty = self.ctx.substitute_generics(param_ty, method_info.def_id, &combined_args);
+                let expected_concrete_ty =
+                    self.ctx
+                        .substitute_generics(param_ty, method_info.def_id, &combined_args);
 
                 self.check_type_match(&expected_concrete_ty, &arg_actual, arg_expr.span);
                 self.coerce_literal_type(arg_expr.id, &expected_concrete_ty, &arg_actual);
             }
 
             let ret_ty = if let Some(r) = ret {
-                self.ctx.substitute_generics(&r, method_info.def_id, &combined_args)
+                self.ctx
+                    .substitute_generics(&r, method_info.def_id, &combined_args)
             } else {
                 TypeKey::Primitive(PrimitiveType::Unit)
             };
@@ -2057,7 +2169,7 @@ impl Analyzer {
         expr_id: NodeId,
         receiver_type: &TypeKey,
         method_name: &Identifier,
-        arguments: &[Expression]
+        arguments: &[Expression],
     ) -> Option<TypeKey> {
         // 1. 提取结构体 DefId 和 Args (穿透指针)
         // 我们利用 extract_def_id 和 extract_generic_args
@@ -2069,13 +2181,22 @@ impl Analyzer {
         let raw_field_ty = fields.get(&method_name.name)?;
 
         // 3. 执行泛型替换 (字段类型里的 T -> i32)
-        let field_ty = self.ctx.substitute_generics(raw_field_ty, struct_id, &struct_args);
+        let field_ty = self
+            .ctx
+            .substitute_generics(raw_field_ty, struct_id, &struct_args);
 
         // 4. 检查是否是函数类型
         if let TypeKey::Function { params, ret, .. } = field_ty {
             // 检查参数 (这里的 params 没有 self，直接匹配)
             if params.len() != arguments.len() {
-                self.error(format!("Field function expects {} args, got {}", params.len(), arguments.len()), method_name.span);
+                self.error(
+                    format!(
+                        "Field function expects {} args, got {}",
+                        params.len(),
+                        arguments.len()
+                    ),
+                    method_name.span,
+                );
             }
 
             for (arg_expr, param_ty) in arguments.iter().zip(params.iter()) {
@@ -2084,18 +2205,29 @@ impl Analyzer {
                 self.coerce_literal_type(arg_expr.id, param_ty, &arg_actual);
             }
 
-            let ret_ty = if let Some(r) = ret { *r } else { TypeKey::Primitive(PrimitiveType::Unit) };
+            let ret_ty = if let Some(r) = ret {
+                *r
+            } else {
+                TypeKey::Primitive(PrimitiveType::Unit)
+            };
             self.record_type(expr_id, ret_ty.clone());
             Some(ret_ty)
         } else {
             // 找到了字段但不是函数
-            self.error(format!("Field '{}' is not a function", method_name.name), method_name.span);
+            self.error(
+                format!("Field '{}' is not a function", method_name.name),
+                method_name.span,
+            );
             Some(TypeKey::Error)
         }
     }
 
     /// 在方法注册表中查找方法 (支持泛型实例的模糊查找)
-    fn find_method_in_registry(&self, receiver_type: &TypeKey, method_name: &str) -> Option<MethodInfo> {
+    fn find_method_in_registry(
+        &self,
+        receiver_type: &TypeKey,
+        method_name: &str,
+    ) -> Option<MethodInfo> {
         // 1. 尝试精确匹配
         if let Some(methods) = self.ctx.method_registry.get(receiver_type) {
             if let Some(info) = methods.get(method_name) {
@@ -2139,7 +2271,9 @@ impl Analyzer {
                     }
 
                     // 存入成品表
-                    self.ctx.instantiated_structs.insert(mangled_name, concrete_fields);
+                    self.ctx
+                        .instantiated_structs
+                        .insert(mangled_name, concrete_fields);
                 }
             }
         }
@@ -2148,15 +2282,17 @@ impl Analyzer {
     /// ==================================================
     /// 辅助函数
     /// ==================================================
-    
+
     // 辅助函数：尝试收集泛型函数的实例化信息
     fn try_record_function_instantiation(&mut self, def_id: DefId, path: &Path) {
         // 1. 检查这是否是一个定义了泛型参数的 Item
         let expected_param_count = if let Some(ids) = self.ctx.def_generic_params.get(&def_id) {
-            if ids.is_empty() { return; } // 不是泛型函数
+            if ids.is_empty() {
+                return;
+            } // 不是泛型函数
             ids.len()
         } else {
-            return; 
+            return;
         };
 
         // 2. 【修正】收集整个 Path 链路上的泛型参数
@@ -2354,13 +2490,16 @@ impl Analyzer {
             TypeKind::Primitive(p) => TypeKey::Primitive(*p),
             TypeKind::Named(path) => {
                 let name_str = &path.segments.last().unwrap().name; // 获取名字方便打印
-                
+
                 // [DEBUG] 开始解析
                 eprintln!("[DEBUG] Resolving TypePath: '{}' ...", name_str);
                 if let Some(def_id) = self.resolve_path(path) {
                     // [DEBUG] 路径解析成功
                     let is_generic = self.ctx.generic_param_defs.contains(&def_id);
-                    eprintln!("[DEBUG]   -> Found DefId: {:?}. Is GenericParam? {}", def_id, is_generic);
+                    eprintln!(
+                        "[DEBUG]   -> Found DefId: {:?}. Is GenericParam? {}",
+                        def_id, is_generic
+                    );
                     // 1. 检查是否是泛型参数 T
                     if self.ctx.generic_param_defs.contains(&def_id) {
                         return TypeKey::GenericParam(def_id);
@@ -2371,7 +2510,10 @@ impl Analyzer {
                     // 取 path 的最后一段看有没有 generic_args
                     if let Some(last_seg) = path.segments.last() {
                         if let Some(ast_args) = &last_seg.generic_args {
-                            eprintln!("[DEBUG]   -> Parsing generic arguments for '{}'...", name_str);
+                            eprintln!(
+                                "[DEBUG]   -> Parsing generic arguments for '{}'...",
+                                name_str
+                            );
                             for arg in ast_args {
                                 args.push(self.resolve_ast_type(arg));
                             }
@@ -2383,14 +2525,17 @@ impl Analyzer {
                     // 如果是具体类型，且是结构体/枚举，加入生成队列
                     if key.is_concrete() {
                         // 这里简单判断一下 def_id 是 Struct/Enum 才加
-                        if self.ctx.struct_fields.contains_key(&def_id) { 
+                        if self.ctx.struct_fields.contains_key(&def_id) {
                             self.ctx.concrete_structs.insert(key.clone());
                         }
                     }
                     key // 返回
                 } else {
                     // [DEBUG] 路径解析彻底失败
-                    eprintln!("[DEBUG]   -> FAILED to resolve path '{}' in current scopes!", name_str);
+                    eprintln!(
+                        "[DEBUG]   -> FAILED to resolve path '{}' in current scopes!",
+                        name_str
+                    );
                     self.dump_current_scopes(); // 打印当前作用域里到底有啥 (见下文辅助函数)
                     self.error(format!("Unknown type: ..."), path.span);
                     TypeKey::Error
@@ -2525,7 +2670,7 @@ impl Analyzer {
                 let parent = current_def_id.unwrap();
                 self.find_symbol_in_namespace(parent, &segment.name)?
             };
-            
+
             current_def_id = Some(found_id);
 
             // 2. 解析这一段的泛型参数 (AST -> TypeKey)
@@ -2535,7 +2680,7 @@ impl Analyzer {
                     segment_args.push(self.resolve_ast_type(arg));
                 }
             }
-            
+
             // 收集到总列表中
             all_generic_args.extend(segment_args.clone());
 
@@ -2583,14 +2728,16 @@ impl Analyzer {
         // 1. 调用层级解析
         if let Some(res) = self.resolve_path_hierarchically(path) {
             let def_id = res.def_id;
-            
+
             // 2. [副作用] 记录 Path 解析结果
             self.ctx.path_resolutions.insert(expr_id, def_id);
 
             // 3. [副作用] 记录泛型实参 (关键修复：Pair_new -> Pair_i32_new)
             // 这里的 all_generic_args 包含了 Pair 的泛型和 new 的泛型(如果有)
             if !res.all_generic_args.is_empty() {
-                self.ctx.node_generic_args.insert(expr_id, res.all_generic_args.clone());
+                self.ctx
+                    .node_generic_args
+                    .insert(expr_id, res.all_generic_args.clone());
             }
 
             // 4. [副作用] 收集单态化需求
@@ -2600,13 +2747,14 @@ impl Analyzer {
 
             // 5. 计算最终类型
             if let Some(mut raw_type) = self.get_type_of_def(def_id) {
-                
                 // 场景 A: 有结构体上下文 (Pair<i32>::new) -> 需要替换 T
                 if let Some((struct_id, struct_args)) = res.struct_context {
                     // 对 raw_type (fn(T)->T) 进行替换 -> fn(i32)->i32
-                    raw_type = self.ctx.substitute_generics(&raw_type, struct_id, &struct_args);
+                    raw_type = self
+                        .ctx
+                        .substitute_generics(&raw_type, struct_id, &struct_args);
                 }
-                
+
                 // 场景 B: 引用泛型类型本身 (Pair<i32>) -> 填充 args
                 // 如果 raw_type 是 Instantiated 但 args 为空，说明我们引用的是结构体本身
                 if let TypeKey::Instantiated { args, .. } = &mut raw_type {
@@ -2626,15 +2774,17 @@ impl Analyzer {
         }
         TypeKey::Error
     }
-    
+
     // 稍微修改一下之前的 try_record... 接受现成的 args
     fn try_record_instantiation_with_args(&mut self, def_id: DefId, args: &[TypeKey]) {
         if let Some(param_ids) = self.ctx.def_generic_params.get(&def_id) {
-            if param_ids.is_empty() { return; } 
-            
+            if param_ids.is_empty() {
+                return;
+            }
+
             // 只有当参数完整且具体时才记录
             if args.len() == param_ids.len() && args.iter().all(|a| a.is_concrete()) {
-                 self.ctx.concrete_functions.insert((def_id, args.to_vec()));
+                self.ctx.concrete_functions.insert((def_id, args.to_vec()));
             }
         }
     }
@@ -2839,7 +2989,7 @@ impl Analyzer {
             // 结构体：核心逻辑
             TypeKey::Instantiated { def_id, args } => {
                 // 这里传入 args 是为了计算布局时把 T 换成 i32
-                self.compute_struct_layout(*def_id, args) 
+                self.compute_struct_layout(*def_id, args)
             }
 
             TypeKey::GenericParam(_) => None,
@@ -2858,8 +3008,10 @@ impl Analyzer {
         // 【修改】这里解构 (_, raw_field_type)
         for (_, raw_field_type) in field_list {
             // 执行泛型替换 T -> i32
-            let actual_type = self.ctx.substitute_generics(raw_field_type, struct_id, args);
-            
+            let actual_type = self
+                .ctx
+                .substitute_generics(raw_field_type, struct_id, args);
+
             // 计算具体类型的大小
             let field_layout = self.get_type_layout(&actual_type)?;
 
@@ -2910,7 +3062,6 @@ impl Analyzer {
         }
         eprintln!("[DEBUG] ---------------------------");
     }
-
 }
 
 #[derive(Debug, Clone, Copy)]

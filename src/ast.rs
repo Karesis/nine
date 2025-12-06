@@ -29,7 +29,7 @@ pub struct Identifier {
 #[derive(Debug, Clone)]
 pub struct GenericParam {
     pub id: NodeId,
-    pub name: Identifier, // "T"
+    pub name: Identifier,       // "T"
     pub constraints: Vec<Path>, // ["Printable", "Clone"]
     pub span: Span,
 }
@@ -411,8 +411,8 @@ pub enum ItemKind {
 
     /// 实现块 imp for Type { ... }
     Implementation {
-        generics: Vec<GenericParam>, 
-        implements: Option<Path>,    
+        generics: Vec<GenericParam>,
+        implements: Option<Path>,
         target_type: Type,
         methods: Vec<FunctionDefinition>,
     },
