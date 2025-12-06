@@ -26,7 +26,6 @@ imp#<T> for *List#<T> {
     }
 
     pub fn pop(mut self) -> T {
-        // 简化测试，不检查空指针，假设调用安全
         set old_head: *Node#<T> = self^.head;
         set val: T = old_head^.data;
         
@@ -40,7 +39,6 @@ imp#<T> for *List#<T> {
 fn main() -> i32 {
     printf("--- Generic List Test ---\n");
     
-    // 或者我们直接在堆上创建 List
     set heap_list: *List#<i32> = malloc(@sizeof(List#<i32>)) as *List#<i32>;
     heap_list^.head = NULL_PTR as *Node#<i32>;
 

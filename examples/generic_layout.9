@@ -1,7 +1,6 @@
 // demo/generic_layout.9
 extern fn printf(fmt: ^u8, ...) -> i32;
 
-// 该结构体的布局取决于 T 的对齐要求
 struct Wrapper#<T> {
     head: u8;      // 1 byte
     // padding?
@@ -14,17 +13,14 @@ fn main() -> i32 {
     printf("--- Layout Test ---\n");
 
     // Case A: T = u8
-    // Layout 应该是: u8(1) + u8(1) + u8(1) = 3 bytes? 或者对齐到 1?
-    // 通常编译器会对齐结构体大小，让我们看看结果
     set size_u8: u64 = @sizeof(Wrapper#<u8>);
     printf("Size of Wrapper#<u8>: %d\n", size_u8);
 
     // Case B: T = i64
-    // Layout 应该是: u8(1) + [padding 7] + i64(8) + u8(1) + [padding 7] = 24 bytes (如果按8字节对齐)
+    // Layout: u8(1) + [padding 7] + i64(8) + u8(1) + [padding 7] = 24 bytes 
     set size_i64: u64 = @sizeof(Wrapper#<i64>);
     printf("Size of Wrapper#<i64>: %d (Expected approx 24 for 64-bit align)\n", size_i64);
 
-    // 验证值存取是否因偏移量计算错误而崩溃
     set w: Wrapper#<i64> = Wrapper#<i64> {
         head: 0xAA,
         payload: 1234567890123,

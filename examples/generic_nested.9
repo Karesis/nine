@@ -3,12 +3,10 @@ extern fn printf(fmt: ^u8, ...) -> i32;
 extern fn malloc(size: u64) -> ^u8;
 extern fn free(ptr: ^u8);
 
-// 一个简单的泛型包装器
 struct Box#<T> {
     val: T;
 }
 
-// 泛型函数：解包两层
 fn unwrap_deep#<T>(container: Box#<Box#<T>>) -> T {
     ret container.val.val;
 }
@@ -19,7 +17,7 @@ fn main() -> i32 {
     // 1. 构建内层
     set inner: Box#<i32> = Box#<i32> { val: 999 };
     
-    // 2. 构建外层 (泛型参数本身也是泛型)
+    // 2. 构建外层 
     set outer: Box#<Box#<i32>> = Box#<Box#<i32>> { val: inner };
 
     // 3. 测试访问
