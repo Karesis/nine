@@ -1,0 +1,56 @@
+extern fn printf(fmt: ^u8, ...) -> i32;
+
+struct Pair#<T, U> {
+    first: T;
+    second: U;    
+    pub fn new(a: T, b: U) -> Pair#<T, U> {
+        ret Pair#<T, U> {
+            first: a,
+            second: b
+        };
+    }
+}
+
+imp#<T, U> for Pair#<T, U> {
+    // 实例方法
+    fn get_first(self) -> T {
+        ret self.first;
+    }
+    
+    fn get_second(self) -> U {
+        ret self.second;
+    }
+}
+
+fn identity#<T>(val: T) -> T {
+    ret val;
+}
+
+fn main() -> i32 {
+    printf("--- Generic Test Start ---\n");
+
+    // Pair<i32, i32>
+    set p1: Pair#<i32, i32> = Pair#<i32, i32>::new(10, 20);
+    
+    // 字段访问和方法调用
+    printf("p1.first (field): %d\n", p1.first);
+    printf("p1.second (method): %d\n", p1.get_second());
+
+    // Pair<i32, f64>
+    set p2: Pair#<i32, f64> = Pair#<i32, f64> {
+        first: 100,
+        second: 3.14
+    };
+    
+    printf("p2: %d, %f\n", p2.first, p2.second);
+
+    // 泛型函数调用 
+    set n: i32 = identity#<i32>(42);
+    set f: f64 = identity#<f64>(99.9);
+
+    printf("identity int: %d\n", n);
+    printf("identity float: %f\n", f);
+
+    printf("--- Generic Test Passed ---\n");
+    ret 0;
+}

@@ -1,0 +1,42 @@
+// demo/generic_fp.9
+extern fn printf(fmt: ^u8, ...) -> i32;
+extern fn malloc(size: u64) -> ^u8;
+extern fn free(ptr: ^u8);
+
+struct Transformer#<T> {
+    val: T;
+    mapper: fn(T) -> T; 
+}
+
+fn double_int(v: i32) -> i32 {
+    ret v * 2;
+}
+
+fn square_int(v: i32) -> i32 {
+    ret v * v;
+}
+
+fn main() -> i32 {
+    printf("--- Generic Function Pointer Test ---\n");
+
+    set t1: Transformer#<i32> = Transformer#<i32> {
+        val: 10,
+        mapper: double_int
+    };
+
+    set res1: i32 = t1.mapper(t1.val);
+    printf("Double 10: %d\n", res1); // Expect 20
+
+    t1.mapper = square_int;
+    set res2: i32 = t1.mapper(t1.val);
+    printf("Square 10: %d\n", res2); // Expect 100
+
+    set res3: i32 = apply#<i32>(5, double_int);
+    printf("Apply Double 5: %d\n", res3); // Expect 10
+
+    ret 0;
+}
+
+fn apply#<T>(val: T, func: fn(T) -> T) -> T {
+    ret func(val);
+}

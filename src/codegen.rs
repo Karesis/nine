@@ -23,7 +23,7 @@ use inkwell::values::{
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use std::collections::HashMap;
 
-use crate::analyzer::{AnalysisContext, DefId, TypeKey};
+use crate::analyzer::{AnalysisContext, DefId, TypeKey, MethodInfo};
 use crate::ast::*;
 
 macro_rules! trace {
@@ -43,6 +43,9 @@ pub struct CodeGen<'a, 'ctx> {
 
     // 局部变量表：DefId -> PointerValue
     pub variables: HashMap<DefId, PointerValue<'ctx>>,
+
+    // 全局变量 (Global Variables)
+    pub globals: HashMap<DefId, PointerValue<'ctx>>,
 
     // 全局函数表：Mangled Name -> LLVM Function
     pub functions: HashMap<String, FunctionValue<'ctx>>,
@@ -84,6 +87,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             builder,
             analysis,
             variables: HashMap::new(),
+            globals: HashMap::new(),
             functions: HashMap::new(),
             struct_types: HashMap::new(),
             struct_field_indices: HashMap::new(),
@@ -976,8 +980,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             }
 
             // L-Value to R-Value conversion (Load)
-            ExpressionKind::Path(_)
-            | ExpressionKind::Index { .. }
+            ExpressionKind::Index { .. }
             | ExpressionKind::FieldAccess { .. } => {
                 trace!("    [Load] 1. Compiling ptr...");
                 let ptr = self.compile_expr_ptr(expr)?;
@@ -998,6 +1001,51 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     .map_err(|_| "Load failed")?;
                 trace!("    [Load] 5. Load successful.");
                 
+                Ok(val)
+            }
+
+            ExpressionKind::Path(path) => {
+                // 1. 获取类型
+                let type_key = self.get_resolved_type(expr.id);
+                
+                // 2. 获取 DefId
+                // 如果解析失败，说明有问题，直接 panic
+                let def_id = *self.analysis.path_resolutions.get(&expr.id).expect("Path not resolved");
+
+                // 3. 【核心修正】检查是否是全局函数定义
+                // 只有当 Path 指向的是真正的函数定义时，我们才去 functions 表里查
+                // 如果是指向变量（参数/局部变量），即使类型是 Function，也要走 Load 逻辑
+                
+                let is_global_function = self.function_index.contains_key(&def_id);
+
+                if is_global_function {
+                    // --- Case A: 引用全局函数 (作为值) ---
+                    
+                    // B. 查 Analyzer 获取泛型实参
+                    let generic_args = self.analysis.node_generic_args
+                        .get(&expr.id)
+                        .cloned()
+                        .unwrap_or_default();
+
+                    // C. 生成修饰名
+                    let fn_mangled_name = self.analysis.get_mangled_function_name(def_id, &generic_args);
+
+                    // D. 查表获取 FunctionValue
+                    let fn_val = *self.functions.get(&fn_mangled_name)
+                        .unwrap_or_else(|| panic!("Function '{}' not found/compiled when used as value", fn_mangled_name));
+                    
+                    // E. 返回函数指针
+                    return Ok(fn_val.as_global_value().as_pointer_value().as_basic_value_enum());
+                }
+
+                // --- Case B: 普通变量 / 函数指针变量 ---
+                // 走正常的 Load 逻辑
+                let ptr = self.compile_expr_ptr(expr)?;
+                let llvm_ty = self.compile_type(&type_key).unwrap();
+                let val = self
+                    .builder
+                    .build_load(llvm_ty, ptr, "load")
+                    .map_err(|_| "Load failed")?;
                 Ok(val)
             }
 
@@ -1061,82 +1109,8 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 Ok(struct_val.as_basic_value_enum())
             }
 
-            ExpressionKind::MethodCall {
-                receiver,
-                method_name,
-                arguments,
-            } => {
-                // 1. 获取 Receiver 的具体类型 (e.g., Box<i32>)
-                let receiver_ty_key = self.get_resolved_type(receiver.id);
-
-                // 2. 查找方法 (使用 AnalysisContext 里的 helper)
-                let mut found_methods = None;
-
-                if let Some(methods) = self.analysis.method_registry.get(&receiver_ty_key) {
-                    found_methods = Some(methods);
-                } else {
-                    // 模糊查找
-                    for (key, methods) in &self.analysis.method_registry {
-                        // 调用 analysis 的 helper
-                        if self.analysis.are_types_compatible(&receiver_ty_key, key) {
-                            found_methods = Some(methods);
-                            break;
-                        }
-                    }
-                }
-
-                let methods = found_methods
-                    .ok_or_else(|| format!("No methods found for type {:?}", receiver_ty_key))?;
-
-                let method_info = methods
-                    .get(&method_name.name)
-                    .ok_or_else(|| format!("Method '{}' not found", method_name.name))?;
-
-                // === 3. 重建函数的修饰名 ===
-                // 我们需要知道这个方法使用了哪些泛型参数 [i32]
-                let method_args = match &receiver_ty_key {
-                    TypeKey::Instantiated { args, .. } => args.clone(),
-                    _ => Vec::new(),
-                };
-
-                // 使用 Analyzer 提供的逻辑生成 "Pair_i32_get_second"
-                let fn_mangled_name = self.analysis.get_mangled_function_name(
-                    method_info.def_id, 
-                    &method_args
-                );
-
-                let fn_val = *self
-                    .functions
-                    .get(&fn_mangled_name)
-                    .unwrap_or_else(|| panic!("Function '{}' not compiled", fn_mangled_name));
-
-                // 4. 准备参数列表：[Receiver, ...Args]
-                let mut compiled_args = Vec::new();
-
-                // 处理 `self` 参数
-                compiled_args.push(self.compile_expr(receiver)?.into());
-
-                for arg in arguments {
-                    compiled_args.push(self.compile_expr(arg)?.into());
-                }
-
-                // 5. 生成 Call
-                let call_site = self
-                    .builder
-                    .build_call(fn_val, &compiled_args, "method_call")
-                    .map_err(|_| "Method call failed")?;
-
-                // 6. 处理返回值
-                use inkwell::values::ValueKind;
-                match call_site.try_as_basic_value() {
-                    ValueKind::Basic(val) => Ok(val),
-                    ValueKind::Instruction(_) => Ok(self
-                        .context
-                        .struct_type(&[], false)
-                        .const_zero()
-                        .as_basic_value_enum()),
-                    _ => Err("Invalid call return".into()),
-                }
+            ExpressionKind::MethodCall { receiver, method_name, arguments } => {
+                self.compile_method_call_dispatch(expr.id, receiver, method_name, arguments)
             }
 
             ExpressionKind::StaticAccess { target: _, member: _ } => {
@@ -1285,6 +1259,142 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     // ========================================================================
     // 7. 辅助函数
     // ========================================================================
+
+    // ==========================================
+    // Method Call 编译逻辑拆分
+    // ==========================================
+
+    fn compile_method_call_dispatch(
+        &mut self,
+        expr_id: NodeId,
+        receiver: &Expression,
+        method_name: &Identifier,
+        arguments: &[Expression]
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        // 1. 获取 Receiver 类型
+        let receiver_ty_key = self.get_resolved_type(receiver.id);
+
+        // 2. 尝试判断是否为标准方法
+        // 逻辑：如果 analyzer.method_registry 里能查到，就是标准方法
+        // 我们复用 Analyzer 的 find_method_in_registry 逻辑 (假设 analysis 是 pub 的)
+        // 这里的逻辑有点重复，但为了 Codegen 独立性，我们再查一次
+        
+        // 我们利用 Analyzer 提供的 Helper 来判断
+        // (需要在 AnalysisContext 里把 find_method_in_registry 变成 pub，或者手写查找)
+        let is_standard_method = self.find_method_info(&receiver_ty_key, &method_name.name).is_some();
+
+        if is_standard_method {
+            return self.compile_standard_method_call(expr_id, receiver, method_name, arguments, &receiver_ty_key);
+        } else {
+            // 否则尝试当做字段函数指针调用
+            return self.compile_field_fn_ptr_call(receiver, method_name, arguments, &receiver_ty_key);
+        }
+    }
+
+    // 辅助：在 Codegen 里查找 MethodInfo (复用 Analyzer 数据)
+    fn find_method_info(&self, receiver_ty: &TypeKey, name: &str) -> Option<&MethodInfo> {
+        // 1. 精确
+        if let Some(methods) = self.analysis.method_registry.get(receiver_ty) {
+            if let Some(info) = methods.get(name) { return Some(info); }
+        }
+        // 2. 模糊
+        if let TypeKey::Instantiated { def_id, .. } = receiver_ty {
+            for (key, methods) in &self.analysis.method_registry {
+                if let TypeKey::Instantiated { def_id: k_id, .. } = key {
+                    if k_id == def_id {
+                         if let Some(info) = methods.get(name) { return Some(info); }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// 路径 1: 编译标准方法调用
+    fn compile_standard_method_call(
+        &mut self,
+        expr_id: NodeId,
+        receiver: &Expression,
+        method_name: &Identifier,
+        arguments: &[Expression],
+        receiver_ty: &TypeKey
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        // 1. 查找定义信息
+        let method_info = self.find_method_info(receiver_ty, &method_name.name)
+            .ok_or("Method info missing in codegen")?;
+
+        // 2. 获取泛型参数 (查表)
+        let method_args = self.analysis.node_generic_args.get(&expr_id).cloned().unwrap_or_default();
+
+        // 3. 重建名字并获取函数
+        let fn_name = self.analysis.get_mangled_function_name(method_info.def_id, &method_args);
+        let fn_val = *self.functions.get(&fn_name)
+            .ok_or_else(|| format!("Function '{}' not compiled", fn_name))?;
+
+        // 4. 准备参数
+        let mut compiled_args = Vec::new();
+        compiled_args.push(self.compile_expr(receiver)?.into()); // self
+        for arg in arguments {
+            compiled_args.push(self.compile_expr(arg)?.into());
+        }
+
+        // 5. 调用
+        let call = self.builder.build_call(fn_val, &compiled_args, "call").map_err(|_| "Call failed")?;
+        self.handle_call_return(call)
+    }
+
+    /// 路径 2: 编译字段函数指针调用
+    fn compile_field_fn_ptr_call(
+        &mut self,
+        receiver: &Expression,
+        method_name: &Identifier,
+        arguments: &[Expression],
+        receiver_ty: &TypeKey
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        // [Logic from previous answer]
+        // 1. 获取 Struct Key (穿透指针)
+        let struct_key = match receiver_ty {
+            TypeKey::Pointer(inner, _) => *inner.clone(),
+            _ => receiver_ty.clone(),
+        };
+        let mangled_struct_name = self.analysis.get_mangling_type_name(&struct_key);
+
+        // 2. 查字段索引
+        let idx = self.get_field_index(&mangled_struct_name, &method_name.name)
+            .ok_or_else(|| format!("Field '{}' not found in struct '{}'", method_name.name, mangled_struct_name))?;
+
+        // 3. 获取字段地址
+        let struct_ptr = self.compile_expr_ptr(receiver)?;
+        let st_ty = *self.struct_types.get(&mangled_struct_name).expect("Struct type missing");
+        
+        let field_ptr = unsafe {
+            self.builder.build_struct_gep(st_ty, struct_ptr, idx, "fn_field_gep").map_err(|_| "GEP failed")?
+        };
+
+        // 4. Load 函数指针
+        // 为了 Load，我们需要知道字段的具体类型。
+        // 从 instantiated_structs 里查
+        let fields_list = self.analysis.instantiated_structs.get(&mangled_struct_name).expect("Instantiated struct missing");
+        let (_, field_type_key) = &fields_list[idx as usize];
+        let llvm_field_type = self.compile_type(field_type_key).unwrap();
+
+        let fn_ptr_val = self.builder.build_load(llvm_field_type, field_ptr, "fn_ptr_load")
+            .map_err(|_| "Load failed")?
+            .into_pointer_value();
+
+        // 5. 准备参数 (没有 self)
+        let mut compiled_args = Vec::new();
+        for arg in arguments {
+            compiled_args.push(self.compile_expr(arg)?.into());
+        }
+
+        // 6. 编译签名并间接调用
+        let fn_type = self.compile_function_type_signature(field_type_key)?;
+        let call = self.builder.build_indirect_call(fn_type, fn_ptr_val, &compiled_args, "indirect_call")
+            .map_err(|_| "Indirect call failed")?;
+
+        self.handle_call_return(call)
+    }
 
     fn compile_literal(
         &self,
@@ -1685,33 +1795,28 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
 
         // =========================================================
-        // Case 1: 直接函数调用 (Direct Call)
-        // e.g. foo(1) 或 foo#<i32>(1)
+        // Case 1: 尝试作为直接函数调用 (Direct Call)
         // =========================================================
-        if let ExpressionKind::Path(path) = &callee.kind {
-            // 【修复】使用 callee.id (Expr ID) 而不是 path.id
-            // Analyzer 的 check_expr 也就是 check_path_expr 是用 expr.id 存的
+        let direct_call_result = if let ExpressionKind::Path(path) = &callee.kind {
             if let Some(&def_id) = self.analysis.path_resolutions.get(&callee.id) {
-                
-                // A. 查表获取泛型实参
                 let generic_args = self.analysis.node_generic_args
                     .get(&callee.id)
                     .cloned()
                     .unwrap_or_default();
-
-                // ... (后续逻辑不变)
                 let fn_mangled_name = self.analysis.get_mangled_function_name(def_id, &generic_args);
                 
+                // 【关键修改】只在找到函数时才返回，否则继续往下走
                 if let Some(fn_val) = self.functions.get(&fn_mangled_name) {
-                    let call_site = self
-                        .builder
-                        .build_call(*fn_val, &compiled_args, "direct_call")
-                        .map_err(|_| "Direct call failed")?;
-                    return self.handle_call_return(call_site);
+                    Some((fn_val, compiled_args.clone())) // 找到了！
                 } else {
-                    panic!("ICE: Function '{}' not found", fn_mangled_name);
+                    None // 没找到，可能是局部变量
                 }
-            }
+            } else { None }
+        } else { None };
+
+        if let Some((fn_val, args)) = direct_call_result {
+             let call_site = self.builder.build_call(*fn_val, &args, "direct_call").unwrap();
+             return self.handle_call_return(call_site);
         }
 
         // =========================================================
@@ -1863,7 +1968,9 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
     /// 辅助函数：从符号表中查找变量地址
     fn get_variable_ptr(&self, def_id: DefId) -> Option<PointerValue<'ctx>> {
-        self.variables.get(&def_id).cloned()
+        self.variables.get(&def_id)
+            .or_else(|| self.globals.get(&def_id)) // 查全局表
+            .cloned()
     }
 
     // 辅助：检查类型是否有符号
@@ -2147,7 +2254,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
 
         // 6. 注册到符号表
-        self.variables.insert(id, global.as_pointer_value());
+        self.globals.insert(id, global.as_pointer_value());
     }
 
     // 辅助函数：编译 sizeof

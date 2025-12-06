@@ -359,6 +359,28 @@ impl AnalysisContext {
             _ => false,
         }
     }
+
+    // 辅助：从类型中提取泛型实参 (递归穿透指针)
+    fn extract_generic_args(&self, ty: &TypeKey) -> Vec<TypeKey> {
+        match ty {
+            TypeKey::Instantiated { args, .. } => args.clone(),
+            TypeKey::Pointer(inner, _) => self.extract_generic_args(inner),
+            TypeKey::Array(inner, _) => self.extract_generic_args(inner),
+            _ => Vec::new(),
+        }
+    }
+
+    // 辅助：从类型中提取 DefId (递归穿透指针/数组，找到最内层的 Named/Instantiated)
+    pub fn extract_def_id(&self, ty: &TypeKey) -> Option<DefId> {
+        match ty {
+            TypeKey::Instantiated { def_id, .. } => Some(*def_id),
+            // 你的 AST 里 Named 已经被移除了，或者作为 Instantiated 的别名，如果有保留也要加
+            // TypeKey::Named(def_id) => Some(*def_id),
+            TypeKey::Pointer(inner, _) => self.extract_def_id(inner),
+            TypeKey::Array(inner, _) => self.extract_def_id(inner),
+            _ => None,
+        }
+    }
 }
 /// ======================================================
 /// 3. Analyzer 主逻辑
@@ -1682,92 +1704,8 @@ impl Analyzer {
                 }
             }
 
-            ExpressionKind::MethodCall {
-                receiver,
-                method_name,
-                arguments,
-            } => {
-                // 1. 检查 Receiver 类型
-                let receiver_type = self.check_expr(receiver);
-                if let TypeKey::Error = receiver_type {
-                    return TypeKey::Error;
-                }
-
-                // 2. 查找方法定义 (使用辅助函数)
-                let method_info = match self.find_method_in_registry(&receiver_type, &method_name.name) {
-                    Some(info) => info,
-                    None => {
-                        self.error(
-                            format!("Method '{}' not found or type matches no impl", method_name.name),
-                            method_name.span,
-                        );
-                        return TypeKey::Error;
-                    }
-                };
-
-                // 3. 提取并记录泛型参数
-                // 此时我们已经有了 method_info，可以安全地记录单态化需求了
-                let mut combined_args = Vec::new();
-                combined_args.extend(self.extract_generic_args(&receiver_type));
-
-                if !combined_args.is_empty() {
-                    // A. 记录到节点表 (Codegen 生成名字用)
-                    self.ctx.node_generic_args.insert(expr.id, combined_args.clone());
-                    
-                    // B. 【关键修复】收集单态化需求 (Codegen 编译函数体用)
-                    // 之前这里顺序反了，导致 method_info 未定义。现在没问题了。
-                    self.try_record_instantiation_with_args(method_info.def_id, &combined_args);
-                }
-
-                // 4. 参数类型检查与替换
-                // 获取方法的原始签名 (含 T)
-                if let Some(TypeKey::Function { params, ret, .. }) =
-                    self.ctx.types.get(&method_info.def_id).cloned()
-                {
-                    // params[0] 是 self，跳过
-                    let expected_args = if params.is_empty() { &[] } else { &params[1..] };
-                    
-                    if expected_args.len() != arguments.len() {
-                        self.error(
-                            format!("Method expects {} arguments, got {}", expected_args.len(), arguments.len()),
-                             expr.span
-                        );
-                    }
-                    
-                    // 遍历检查参数
-                    for (arg_expr, param_ty) in arguments.iter().zip(expected_args.iter()) {
-                        let arg_actual = self.check_expr(arg_expr);
-                        
-                        // 【替换逻辑】T -> i32
-                        let expected_concrete_ty = if let TypeKey::Instantiated { def_id, .. } = &receiver_type {
-                            self.ctx.substitute_generics(param_ty, *def_id, &combined_args)
-                        } else {
-                            param_ty.clone()
-                        };
-
-                        self.check_type_match(&expected_concrete_ty, &arg_actual, arg_expr.span);
-                        self.coerce_literal_type(arg_expr.id, &expected_concrete_ty, &arg_actual);
-                    }
-
-                    // 5. 处理返回值
-                    if let Some(r) = ret {
-                        if let TypeKey::Instantiated { def_id, .. } = &receiver_type {
-                            let ret_ty = self.ctx.substitute_generics(&r, *def_id, &combined_args);
-                            self.record_type(expr.id, ret_ty.clone());
-                            ret_ty
-                        } else {
-                            self.record_type(expr.id, *r.clone());
-                            *r
-                        }
-                    } else {
-                        self.record_type(expr.id, TypeKey::Primitive(PrimitiveType::Unit));
-                        TypeKey::Primitive(PrimitiveType::Unit)
-                    }
-                } else {
-                    // 防御性编程：找到了 MethodInfo 但 types 表里没记录类型
-                    self.error("ICE: Method definition type missing", method_name.span);
-                    TypeKey::Error
-                }
+            ExpressionKind::MethodCall { receiver, method_name, arguments } => {
+                self.check_method_call_dispatch(expr.id, receiver, method_name, arguments)
             }
 
             ExpressionKind::Index { target, index } => {
@@ -2019,6 +1957,141 @@ impl Analyzer {
 
         self.record_type(expr.id, ty.clone());
         ty
+    }
+
+    // ==========================================
+    // Method Call 逻辑拆分
+    // ==========================================
+
+    /// 1. MethodCall 总入口
+    fn check_method_call_dispatch(
+        &mut self, 
+        expr_id: NodeId,
+        receiver: &Expression, 
+        method_name: &Identifier, 
+        arguments: &[Expression]
+    ) -> TypeKey {
+        // A. 先检查 Receiver 的类型
+        let receiver_type = self.check_expr(receiver);
+        if let TypeKey::Error = receiver_type { return TypeKey::Error; }
+
+        // B. 尝试路径 1：标准方法调用 (impl MyStruct { fn foo() })
+        if let Some(ty) = self.check_standard_method_call(expr_id, &receiver_type, method_name, arguments) {
+            return ty;
+        }
+
+        // C. 尝试路径 2：函数指针字段调用 (struct A { foo: fn() })
+        if let Some(ty) = self.check_field_fn_ptr_call(expr_id, &receiver_type, method_name, arguments) {
+            return ty;
+        }
+
+        // D. 都失败了
+        self.error(
+            format!("Method or Field '{}' not found on type {:?}", method_name.name, receiver_type), 
+            method_name.span
+        );
+        TypeKey::Error
+    }
+
+    /// 路径 1：标准方法调用检查
+    fn check_standard_method_call(
+        &mut self,
+        expr_id: NodeId,
+        receiver_type: &TypeKey,
+        method_name: &Identifier,
+        arguments: &[Expression]
+    ) -> Option<TypeKey> {
+        // 1. 查找方法定义
+        let method_info = self.find_method_in_registry(receiver_type, &method_name.name)?;
+
+        // 2. 提取并记录泛型参数
+        let mut combined_args = Vec::new();
+        combined_args.extend(self.ctx.extract_generic_args(receiver_type));
+
+        if !combined_args.is_empty() {
+            self.ctx.node_generic_args.insert(expr_id, combined_args.clone());
+            self.try_record_instantiation_with_args(method_info.def_id, &combined_args);
+        }
+
+        // 3. 检查参数与返回值
+        // 获取原始签名
+        if let Some(TypeKey::Function { params, ret, .. }) = self.ctx.types.get(&method_info.def_id).cloned() {
+            // params[0] 是 self
+            let expected_args = if params.is_empty() { &[] } else { &params[1..] };
+
+            if expected_args.len() != arguments.len() {
+                self.error(
+                    format!("Method expects {} arguments, got {}", expected_args.len(), arguments.len()),
+                    method_name.span
+                );
+            }
+
+            for (arg_expr, param_ty) in arguments.iter().zip(expected_args.iter()) {
+                let arg_actual = self.check_expr(arg_expr);
+                
+                // 执行泛型替换 (T -> i32)
+                let expected_concrete_ty = self.ctx.substitute_generics(param_ty, method_info.def_id, &combined_args);
+
+                self.check_type_match(&expected_concrete_ty, &arg_actual, arg_expr.span);
+                self.coerce_literal_type(arg_expr.id, &expected_concrete_ty, &arg_actual);
+            }
+
+            let ret_ty = if let Some(r) = ret {
+                self.ctx.substitute_generics(&r, method_info.def_id, &combined_args)
+            } else {
+                TypeKey::Primitive(PrimitiveType::Unit)
+            };
+
+            self.record_type(expr_id, ret_ty.clone());
+            Some(ret_ty)
+        } else {
+            // 找到了 MethodInfo 但 types 表里没数据，这是 ICE
+            self.error("ICE: Method definition type missing", method_name.span);
+            Some(TypeKey::Error)
+        }
+    }
+
+    /// 路径 2：函数指针字段检查
+    fn check_field_fn_ptr_call(
+        &mut self,
+        expr_id: NodeId,
+        receiver_type: &TypeKey,
+        method_name: &Identifier,
+        arguments: &[Expression]
+    ) -> Option<TypeKey> {
+        // 1. 提取结构体 DefId 和 Args (穿透指针)
+        // 我们利用 extract_def_id 和 extract_generic_args
+        let struct_id = self.ctx.extract_def_id(receiver_type)?;
+        let struct_args = self.ctx.extract_generic_args(receiver_type);
+
+        // 2. 查找字段
+        let fields = self.ctx.struct_fields.get(&struct_id)?;
+        let raw_field_ty = fields.get(&method_name.name)?;
+
+        // 3. 执行泛型替换 (字段类型里的 T -> i32)
+        let field_ty = self.ctx.substitute_generics(raw_field_ty, struct_id, &struct_args);
+
+        // 4. 检查是否是函数类型
+        if let TypeKey::Function { params, ret, .. } = field_ty {
+            // 检查参数 (这里的 params 没有 self，直接匹配)
+            if params.len() != arguments.len() {
+                self.error(format!("Field function expects {} args, got {}", params.len(), arguments.len()), method_name.span);
+            }
+
+            for (arg_expr, param_ty) in arguments.iter().zip(params.iter()) {
+                let arg_actual = self.check_expr(arg_expr);
+                self.check_type_match(param_ty, &arg_actual, arg_expr.span);
+                self.coerce_literal_type(arg_expr.id, param_ty, &arg_actual);
+            }
+
+            let ret_ty = if let Some(r) = ret { *r } else { TypeKey::Primitive(PrimitiveType::Unit) };
+            self.record_type(expr_id, ret_ty.clone());
+            Some(ret_ty)
+        } else {
+            // 找到了字段但不是函数
+            self.error(format!("Field '{}' is not a function", method_name.name), method_name.span);
+            Some(TypeKey::Error)
+        }
     }
 
     /// 在方法注册表中查找方法 (支持泛型实例的模糊查找)
@@ -2836,16 +2909,6 @@ impl Analyzer {
             }
         }
         eprintln!("[DEBUG] ---------------------------");
-    }
-
-    // 辅助：从类型中提取泛型实参 (递归穿透指针)
-    fn extract_generic_args(&self, ty: &TypeKey) -> Vec<TypeKey> {
-        match ty {
-            TypeKey::Instantiated { args, .. } => args.clone(),
-            TypeKey::Pointer(inner, _) => self.extract_generic_args(inner),
-            TypeKey::Array(inner, _) => self.extract_generic_args(inner),
-            _ => Vec::new(),
-        }
     }
 
 }

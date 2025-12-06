@@ -1,0 +1,39 @@
+// demo/generic_nested.9
+extern fn printf(fmt: ^u8, ...) -> i32;
+extern fn malloc(size: u64) -> ^u8;
+extern fn free(ptr: ^u8);
+
+// 一个简单的泛型包装器
+struct Box#<T> {
+    val: T;
+}
+
+// 泛型函数：解包两层
+fn unwrap_deep#<T>(container: Box#<Box#<T>>) -> T {
+    ret container.val.val;
+}
+
+fn main() -> i32 {
+    printf("--- Nested Generic Test ---\n");
+
+    // 1. 构建内层
+    set inner: Box#<i32> = Box#<i32> { val: 999 };
+    
+    // 2. 构建外层 (泛型参数本身也是泛型)
+    set outer: Box#<Box#<i32>> = Box#<Box#<i32>> { val: inner };
+
+    // 3. 测试访问
+    printf("Inner value direct: %d\n", outer.val.val);
+    
+    // 4. 测试泛型函数传参
+    set res: i32 = unwrap_deep#<i32>(outer);
+    printf("Unwrapped via func: %d\n", res);
+
+    if (res == 999) {
+        printf("PASS: Nested generics work.\n");
+    } else {
+        printf("FAIL: Value mismatch.\n");
+    }
+
+    ret 0;
+}

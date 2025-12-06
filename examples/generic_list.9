@@ -1,0 +1,65 @@
+// demo/generic_list.9
+extern fn malloc(size: u64) -> ^u8;
+extern fn free(ptr: ^u8);
+extern fn printf(fmt: ^u8, ...) -> i32;
+
+const NULL_PTR: ^u8 = 0 as ^u8;
+
+struct Node#<T> {
+    data: T;
+    next: *Node#<T>;
+}
+
+struct List#<T> {
+    head: *Node#<T>;
+    pub fn new() -> List#<T> {
+        ret List#<T> { head: NULL_PTR as *Node#<T> };
+    }
+}
+
+imp#<T> for *List#<T> {
+    pub fn push(mut self, val: T) {
+        set new_node: *Node#<T> = malloc(@sizeof(Node#<T>)) as *Node#<T>;
+        new_node^.data = val;
+        new_node^.next = self^.head;
+        self^.head = new_node;
+    }
+
+    pub fn pop(mut self) -> T {
+        // 简化测试，不检查空指针，假设调用安全
+        set old_head: *Node#<T> = self^.head;
+        set val: T = old_head^.data;
+        
+        self^.head = old_head^.next;
+        free(old_head as ^u8);
+        
+        ret val;
+    }
+}
+
+fn main() -> i32 {
+    printf("--- Generic List Test ---\n");
+    
+    // 或者我们直接在堆上创建 List
+    set heap_list: *List#<i32> = malloc(@sizeof(List#<i32>)) as *List#<i32>;
+    heap_list^.head = NULL_PTR as *Node#<i32>;
+
+    printf("Pushing 10, 20, 30...\n");
+    heap_list.push(10);
+    heap_list.push(20);
+    heap_list.push(30);
+
+    set v1: i32 = heap_list.pop(); // Should be 30
+    set v2: i32 = heap_list.pop(); // Should be 20
+    set v3: i32 = heap_list.pop(); // Should be 10
+
+    printf("Popped: %d, %d, %d\n", v1, v2, v3);
+
+    if (v1 == 30 and v3 == 10) {
+        printf("PASS: LIFO order correct.\n");
+    } else {
+        printf("FAIL: Order incorrect.\n");
+    }
+
+    ret 0;
+}
