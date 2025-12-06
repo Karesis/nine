@@ -113,6 +113,13 @@ pub struct MethodInfo {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefKind {
+    Struct,
+    Union,
+    Enum,
+}
+
 #[derive(Debug)]
 pub struct AnalysisContext {
     pub namespace_scopes: HashMap<DefId, Scope>,
@@ -145,6 +152,14 @@ pub struct AnalysisContext {
     pub non_generic_functions: HashSet<DefId>,
 
     pub node_generic_args: HashMap<NodeId, Vec<TypeKey>>,
+
+    // 记录定义的种类 (Struct/Union/Enum)
+    pub def_kind: HashMap<DefId, DefKind>,
+
+    // 记录 Enum 的底层整数类型 (C-style Enum)
+    // 如 enum Color : u8 { ... } -> u8
+    // 如果没有显式指定，默认为 i32
+    pub enum_underlying_types: HashMap<DefId, PrimitiveType>,
 }
 
 impl AnalysisContext {
@@ -168,6 +183,8 @@ impl AnalysisContext {
             instantiated_structs: HashMap::new(),
             non_generic_functions: HashSet::new(),
             node_generic_args: HashMap::new(),
+            def_kind: HashMap::new(),
+            enum_underlying_types: HashMap::new(),
             target,
         }
     }
@@ -353,6 +370,123 @@ impl AnalysisContext {
             _ => None,
         }
     }
+
+    pub fn get_type_layout(&self, key: &TypeKey) -> Option<Layout> {
+        match key {
+            TypeKey::Primitive(p) => {
+                let s = self.get_primitive_size(p);
+                Some(Layout::new(s, s))
+            }
+
+            TypeKey::Pointer(..) | TypeKey::Function { .. } => {
+                let ptr_size = self.target.ptr_byte_width;
+                let ptr_align = self.target.ptr_align;
+                Some(Layout::new(ptr_size, ptr_align))
+            }
+
+            TypeKey::Array(inner, count) => {
+                let inner_layout = self.get_type_layout(inner)?;
+
+                Some(Layout::new(inner_layout.size * count, inner_layout.align))
+            }
+
+            TypeKey::Instantiated { def_id, args } => self.compute_composite_layout(*def_id, args),
+
+            TypeKey::GenericParam(_) => None,
+
+            _ => None,
+        }
+    }
+
+    fn get_primitive_size(&self, p: &PrimitiveType) -> u64 {
+        use PrimitiveType::*;
+        match p {
+            I8 | U8 | Bool => 1,
+            I16 | U16 => 2,
+            I32 | U32 | F32 => 4,
+            I64 | U64 | F64 => 8,
+
+            ISize | USize => self.target.usize_width(),
+            Unit => 0,
+        }
+    }
+
+    fn compute_composite_layout(&self, def_id: DefId, args: &[TypeKey]) -> Option<Layout> {
+        let kind = self.def_kind.get(&def_id).cloned().unwrap_or(DefKind::Struct); // 默认为 Struct 防止 panic
+        match kind {
+            // === Case A: 结构体 (字段顺序排列) ===
+            DefKind::Struct => {
+                let field_list = self.struct_definitions.get(&def_id)?;
+
+                let mut current_offset = 0u64;
+                let mut max_align = 1u64;
+
+                for (_, raw_field_type) in field_list {
+                    let actual_type = self.substitute_generics(raw_field_type, def_id, args);
+                    let field_layout = self.get_type_layout(&actual_type)?;
+
+                    // 对齐
+                    let mask = field_layout.align - 1;
+                    if (current_offset & mask) != 0 {
+                        current_offset = (current_offset + mask) & !mask;
+                    }
+
+                    // 累加 Size
+                    current_offset += field_layout.size;
+
+                    // 更新 Max Align
+                    if field_layout.align > max_align {
+                        max_align = field_layout.align;
+                    }
+                }
+
+                // 末尾填充
+                let mask = max_align - 1;
+                if (current_offset & mask) != 0 {
+                    current_offset = (current_offset + mask) & !mask;
+                }
+
+                Some(Layout::new(current_offset, max_align))
+            }
+
+            // === Case B: 联合体 (字段重叠) ===
+            DefKind::Union => {
+                let field_list = self.struct_definitions.get(&def_id)?;
+
+                let mut max_size = 0u64;
+                let mut max_align = 1u64;
+
+                for (_, raw_field_type) in field_list {
+                    let actual_type = self.substitute_generics(raw_field_type, def_id, args);
+                    let field_layout = self.get_type_layout(&actual_type)?;
+                    if field_layout.size > max_size {
+                        max_size = field_layout.size;
+                    }
+                    if field_layout.align > max_align {
+                        max_align = field_layout.align;
+                    }
+                }
+                let mask = max_align - 1;
+                if (max_size & mask) != 0 {
+                    max_size = (max_size + mask) & !mask;
+                }
+
+                Some(Layout::new(max_size, max_align))
+            }
+
+            // === Case C: 枚举 (C-Style) ===
+            DefKind::Enum => {
+                // 枚举本身的大小 = 底层整数类型的大小
+                let underlying = *self.enum_underlying_types.get(&def_id)?;
+                
+                // 复用 get_primitive_size
+                let size = self.get_primitive_size(&underlying);
+                let align = size; // 整数通常 align = size
+
+                Some(Layout::new(size, align))
+            }
+        }
+    }
 }
 /// ======================================================
 /// 3. Analyzer 主逻辑
@@ -475,6 +609,7 @@ impl Analyzer {
                     }
 
                     self.register_static_methods(item.id, &def.static_methods);
+                    self.ctx.def_kind.insert(item.id, DefKind::Struct);
                 }
 
                 ItemKind::UnionDecl(def) => {
@@ -504,6 +639,7 @@ impl Analyzer {
                     }
 
                     self.register_static_methods(item.id, &def.static_methods);
+                    self.ctx.def_kind.insert(item.id, DefKind::Union);
                 }
 
                 ItemKind::EnumDecl(def) => {
@@ -545,6 +681,9 @@ impl Analyzer {
                         }
                     }
                     self.ctx.namespace_scopes.insert(item.id, enum_scope);
+                    self.ctx.def_kind.insert(item.id, DefKind::Enum);
+                    let underlying = def.underlying_type.unwrap_or(PrimitiveType::I32); // 默认 i32
+                    self.ctx.enum_underlying_types.insert(item.id, underlying);
                 }
 
                 ItemKind::FunctionDecl(def) => {
@@ -2510,7 +2649,7 @@ impl Analyzer {
     /// 尝试在语义分析阶段计算类型大小
     /// 返回 None 表示该类型的大小依赖后端 Layout (如 Struct)，无法在 Analyzer 阶段确定
     fn get_type_static_size(&self, key: &TypeKey) -> Option<u64> {
-        self.get_type_layout(key).map(|l| l.size)
+        self.ctx.get_type_layout(key).map(|l| l.size)
     }
 
     /// 检查类型转换是否合法
@@ -2546,81 +2685,11 @@ impl Analyzer {
     }
 
     fn get_type_static_align(&self, key: &TypeKey) -> Option<u64> {
-        self.get_type_layout(key).map(|l| l.align)
+        self.ctx.get_type_layout(key).map(|l| l.align)
     }
 
     fn is_numeric_or_bool_char(&self, p: &PrimitiveType) -> bool {
         self.is_numeric_type(p) || matches!(p, PrimitiveType::Bool)
-    }
-
-    fn get_type_layout(&self, key: &TypeKey) -> Option<Layout> {
-        match key {
-            TypeKey::Primitive(p) => {
-                let s = self.get_primitive_size(p);
-                Some(Layout::new(s, s))
-            }
-
-            TypeKey::Pointer(..) | TypeKey::Function { .. } => {
-                let ptr_size = self.ctx.target.ptr_byte_width;
-                let ptr_align = self.ctx.target.ptr_align;
-                Some(Layout::new(ptr_size, ptr_align))
-            }
-
-            TypeKey::Array(inner, count) => {
-                let inner_layout = self.get_type_layout(inner)?;
-
-                Some(Layout::new(inner_layout.size * count, inner_layout.align))
-            }
-
-            TypeKey::Instantiated { def_id, args } => self.compute_struct_layout(*def_id, args),
-
-            TypeKey::GenericParam(_) => None,
-
-            _ => None,
-        }
-    }
-
-    fn compute_struct_layout(&self, struct_id: DefId, args: &[TypeKey]) -> Option<Layout> {
-        let field_list = self.ctx.struct_definitions.get(&struct_id)?;
-
-        let mut current_offset = 0u64;
-        let mut max_align = 1u64;
-
-        for (_, raw_field_type) in field_list {
-            let actual_type = self
-                .ctx
-                .substitute_generics(raw_field_type, struct_id, args);
-
-            let field_layout = self.get_type_layout(&actual_type)?;
-
-            let mask = field_layout.align - 1;
-            if (current_offset & mask) != 0 {
-                current_offset = (current_offset + mask) & !mask;
-            }
-            current_offset += field_layout.size;
-            if field_layout.align > max_align {
-                max_align = field_layout.align;
-            }
-        }
-        let mask = max_align - 1;
-        if (current_offset & mask) != 0 {
-            current_offset = (current_offset + mask) & !mask;
-        }
-
-        Some(Layout::new(current_offset, max_align))
-    }
-
-    fn get_primitive_size(&self, p: &PrimitiveType) -> u64 {
-        use PrimitiveType::*;
-        match p {
-            I8 | U8 | Bool => 1,
-            I16 | U16 => 2,
-            I32 | U32 | F32 => 4,
-            I64 | U64 | F64 => 8,
-
-            ISize | USize => self.ctx.target.usize_width(),
-            Unit => 0,
-        }
     }
 
     fn is_generic_param(&self, id: DefId) -> bool {

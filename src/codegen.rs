@@ -25,6 +25,7 @@ use std::collections::HashMap;
 
 use crate::analyzer::{AnalysisContext, DefId, MethodInfo, TypeKey};
 use crate::ast::*;
+use crate::analyzer::DefKind;
 
 macro_rules! trace {
     ($($arg:tt)*) => {
@@ -122,13 +123,27 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         match key {
             TypeKey::Primitive(prim) => Some(self.compile_primitive_type(prim)),
 
-            TypeKey::Instantiated { .. } => {
-                let mangled_name = self.analysis.get_mangling_type_name(key);
+            TypeKey::Instantiated { def_id, .. } => {
+                // 1. 查 Analyzer 获取定义种类
+                let kind = self.analysis.def_kind.get(def_id).cloned().unwrap_or(DefKind::Struct);
 
-                if let Some(st) = self.struct_types.get(&mangled_name) {
-                    Some(st.as_basic_type_enum())
-                } else {
-                    panic!("ICE: Struct type '{}' not pre-generated.", mangled_name);
+                match kind {
+                    // Case A: Enum 是整数
+                    DefKind::Enum => {
+                        let underlying = self.analysis.enum_underlying_types.get(def_id)
+                            .cloned().unwrap_or(PrimitiveType::I32);
+                        Some(self.compile_primitive_type(&underlying))
+                    }
+                    
+                    // Case B: Struct 和 Union 都是 LLVM Struct
+                    DefKind::Struct | DefKind::Union => {
+                        let mangled_name = self.analysis.get_mangling_type_name(key);
+                        if let Some(st) = self.struct_types.get(&mangled_name) {
+                            Some(st.as_basic_type_enum())
+                        } else {
+                            panic!("ICE: Struct/Union type '{}' not pre-generated.", mangled_name);
+                        }
+                    }
                 }
             }
 
@@ -237,41 +252,80 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     }
 
     fn declare_concrete_structs(&mut self) {
-        for (mangled_name, _) in &self.analysis.instantiated_structs {
-            let st = self.context.opaque_struct_type(mangled_name);
-
-            self.struct_types.insert(mangled_name.clone(), st);
+        for key in &self.analysis.concrete_structs {
+            if let TypeKey::Instantiated { def_id, .. } = key {
+                let kind = self.analysis.def_kind.get(def_id).cloned().unwrap_or(DefKind::Struct);
+                
+                if matches!(kind, DefKind::Struct | DefKind::Union) {
+                    let mangled_name = self.analysis.get_mangling_type_name(key);
+                    
+                    // 避免重复创建
+                    if !self.struct_types.contains_key(&mangled_name) {
+                        let st = self.context.opaque_struct_type(&mangled_name);
+                        self.struct_types.insert(mangled_name, st);
+                    }
+                }
+            }
         }
     }
 
     fn fill_concrete_struct_bodies(&mut self) {
-        let structs: Vec<_> = self
-            .analysis
-            .instantiated_structs
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        // 还是遍历 concrete_structs 比较稳妥，因为我们需要 DefId 来判断 Kind
+        let structs: Vec<_> = self.analysis.concrete_structs.iter().cloned().collect();
 
-        for (mangled_name, fields) in structs {
-            let st = *self
-                .struct_types
-                .get(&mangled_name)
-                .expect("Struct type missing");
+        for key in structs {
+            if let TypeKey::Instantiated { def_id, args } = &key {
+                let kind = self.analysis.def_kind.get(def_id).cloned().unwrap_or(DefKind::Struct);
+                
+                // Enum 跳过
+                if kind == DefKind::Enum { continue; }
 
-            let mut llvm_field_types = Vec::new();
-            let mut indices = HashMap::new();
+                let mangled_name = self.analysis.get_mangling_type_name(&key);
+                let st = *self.struct_types.get(&mangled_name).expect("Struct type missing");
 
-            for (i, (field_name, field_type_key)) in fields.iter().enumerate() {
-                let llvm_ty = self
-                    .compile_type(field_type_key)
-                    .expect("Field type compile failed");
+                // 检查是否已经填过 Body (防止重复)
+                if !st.is_opaque() { continue; }
 
-                llvm_field_types.push(llvm_ty);
-                indices.insert(field_name.clone(), i as u32);
+                match kind {
+                    // === Struct ===
+                    DefKind::Struct => {
+                        // 查 instantiated_structs 拿字段列表
+                        if let Some(fields) = self.analysis.instantiated_structs.get(&mangled_name) {
+                            let mut llvm_field_types = Vec::new();
+                            let mut indices = HashMap::new();
+
+                            for (i, (field_name, field_type_key)) in fields.iter().enumerate() {
+                                let llvm_ty = self.compile_type(field_type_key).expect("Field type compile failed");
+                                llvm_field_types.push(llvm_ty);
+                                indices.insert(field_name.clone(), i as u32);
+                            }
+
+                            st.set_body(&llvm_field_types, false);
+                            self.struct_field_indices.insert(mangled_name, indices);
+                        }
+                    }
+                    
+                    // === Union ===
+                    DefKind::Union => {
+                        // Union 在 LLVM 中通常表示为一个字节数组，大小等于最大对齐后的大小
+                        // 我们利用 Analyzer 算好的 Layout
+                        if let Some(layout) = self.analysis.get_type_layout(&key) {
+                            let size = layout.size;
+                            // 生成 [size x i8]
+                            let byte_type = self.context.i8_type();
+                            let array_type = byte_type.array_type(size as u32);
+                            
+                            st.set_body(&[array_type.as_basic_type_enum()], false); // packed=false
+                            
+                            // Union 不需要 field indices，因为所有字段偏移量都是 0
+                            // 我们存一个空的 Map 或者根本不存
+                            self.struct_field_indices.insert(mangled_name, HashMap::new());
+                        }
+                    }
+                    
+                    _ => {}
+                }
             }
-
-            st.set_body(&llvm_field_types, false);
-            self.struct_field_indices.insert(mangled_name, indices);
         }
     }
 
@@ -1036,42 +1090,35 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.get_variable_ptr(*def_id).ok_or("Var missing".into())
             }
 
-            ExpressionKind::FieldAccess {
-                receiver,
-                field_name,
-            } => {
+            ExpressionKind::FieldAccess { receiver, field_name } => {
+                // 编译 Receiver 指针
                 let ptr = self.compile_expr_ptr(receiver)?;
-
                 let recv_type_key = self.get_resolved_type(receiver.id);
 
-                if let TypeKey::Instantiated { .. } = &recv_type_key {
-                    let mangled_name = self.analysis.get_mangling_type_name(&recv_type_key);
+                if let TypeKey::Instantiated { def_id, .. } = &recv_type_key {
+                    let kind = self.analysis.def_kind.get(def_id).cloned().unwrap_or(DefKind::Struct);
+                    
+                    match kind {
+                        // === Case A: Struct (GEP) ===
+                        DefKind::Struct => {
+                            let mangled_name = self.analysis.get_mangling_type_name(&recv_type_key);
+                            let idx = self.get_field_index(&mangled_name, &field_name.name)
+                                .ok_or_else(|| format!("Field not found"))?;
+                            let st_ty = *self.struct_types.get(&mangled_name).unwrap();
 
-                    let idx = self
-                        .get_field_index(&mangled_name, &field_name.name)
-                        .ok_or_else(|| {
-                            format!(
-                                "Field '{}' missing in struct '{}'",
-                                field_name.name, mangled_name
-                            )
-                        })?;
+                            let field_ptr = self.builder.build_struct_gep(st_ty, ptr, idx, "gep").map_err(|_| "GEP failed")?;
+                            Ok(field_ptr)
+                        }
 
-                    let st_ty = *self
-                        .struct_types
-                        .get(&mangled_name)
-                        .expect("Struct type missing in codegen");
-
-                    let field_ptr = unsafe {
-                        self.builder
-                            .build_struct_gep(st_ty, ptr, idx, "gep")
-                            .map_err(|_| "GEP failed")?
-                    };
-                    Ok(field_ptr)
+                        // === Case B: Union ===
+                        DefKind::Union => {
+                            Ok(ptr) 
+                        }
+                        
+                        DefKind::Enum => Err("Cannot access field of Enum".into()),
+                    }
                 } else {
-                    return Err(format!(
-                        "Field access on non-struct type: {:?}",
-                        recv_type_key
-                    ));
+                    Err(format!("Field access on non-composite type: {:?}", recv_type_key))
                 }
             }
 
