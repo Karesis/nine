@@ -12,7 +12,7 @@
 
 > "A language that bridges the gap between C's transparency and modern type system needs."
 
-## ✨ Key Features
+## Key Features
 
   - **Zero-Cost Generics**: Monomorphized generics (`struct#<T>`, `fn#<T>`) allow for powerful abstractions without runtime overhead.
   - **Explicit Memory Control**: No Garbage Collection. Manual memory management via `malloc`/`free` with clear pointer semantics (`^T` for raw pointers, `*T` for pointers to structs).
@@ -21,7 +21,7 @@
   - **C Interop**: Seamless FFI with C standard libraries.
   - **Module System**: File-system based organization with `mod` and `use`.
 
-## 🛠️ Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -63,7 +63,7 @@ clang main.o -o main
 ./main
 ```
 
-## 📝 Language Tour
+## Language Tour
 
 ### 1\. Generics & Data Structures
 
@@ -172,7 +172,7 @@ fn check_layout() {
 }
 ```
 
-## 🗺️ Roadmap
+## Roadmap
 
   - [x] Basic Types & Control Flow
   - [x] Functions & Recursion
@@ -183,6 +183,6 @@ fn check_layout() {
   - [ ] Standard Library (FLUF integration)
   - [ ] Self-hosting (writing the compiler in Nine)
 
-## 📄 License
+## License
 
 This project is licensed under the Apache-2.0 License.
