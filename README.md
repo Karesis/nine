@@ -15,6 +15,7 @@
 ## Key Features
 
   - **Zero-Cost Generics**: Monomorphized generics (`struct#<T>`, `fn#<T>`) allow for powerful abstractions without runtime overhead.
+  - **Integrated Toolchain**: Compiles directly to native executables by orchestrating LLVM and Clang automatically.
   - **Explicit Memory Control**: No Garbage Collection. Manual memory management via `malloc`/`free` with clear pointer semantics (`^T` for raw pointers, `*T` for pointers to structs).
   - **Method Extensions**: Define methods for types using `imp` blocks, supporting both static (`Type::new`) and instance (`obj.method`) syntax.
   - **Predictable Layout**: Precise control over memory layout with `@sizeof` introspection, making it suitable for low-level systems programming.
@@ -27,7 +28,7 @@
 
   - **LLVM 18+** (LLVM 20 recommended).
   - **Rust Toolchain** (Cargo).
-  - **Clang** (for linking).
+  - **Clang** (Required in `PATH` for linking executables).
 
 ### Installation
 
@@ -35,6 +36,7 @@
 git clone https://github.com/Karesis/nine.git
 cd nine
 cargo build --release
+# Optional: Add target/release to your PATH
 ```
 
 ### Compile & Run
@@ -50,17 +52,37 @@ fn main() -> i32 {
 }
 ```
 
-Compile it:
+Compile it (Nine automatically handles object generation and linking):
 
 ```bash
-# 1. Compile source to object file
+# Compile directly to an executable
 ninec main.9
 
-# 2. Link with libc (using clang)
-clang main.o -o main
-
-# 3. Run
+# Run the generated binary
 ./main
+# (On Windows: .\main.exe)
+```
+
+## CLI Usage
+
+Nine comes with a lightweight, built-in CLI driver:
+
+```text
+Usage: ninec [OPTIONS] <INPUT>
+
+Options:
+  -o, --output <FILE>   Specify output file path (default: same as input name)
+  --emit <TYPE>         Emit type [ir|bc|obj|exe] (default: exe)
+  --target <TRIPLE>     Target triple (e.g., x86_64-unknown-linux-gnu)
+  -v, --verbose         Enable verbose logging (shows linker commands)
+  -h, --help            Print help message
+```
+
+**Cross-Compilation Example:**
+
+```bash
+# Cross-compile for ARM64 Linux (requires clang cross-compilation support)
+ninec main.9 --target aarch64-unknown-linux-gnu -o main_arm
 ```
 
 ## Language Tour
@@ -180,6 +202,7 @@ fn check_layout() {
   - [x] **Generics** (`struct#<T>`, `fn#<T>`)
   - [x] **Methods & OOP Syntax** (`imp`, `obj.method()`)
   - [x] Struct Layout & Padding
+  - [x] **Compiler Driver & Linker** (Output Executables directly)
   - [ ] Standard Library (FLUF integration)
   - [ ] Self-hosting (writing the compiler in Nine)
 
