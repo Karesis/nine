@@ -76,8 +76,8 @@ impl SourceFile {
     /// 核心算法：利用二分查找快速定位行号
     pub fn lookup_line(&self, offset: usize) -> usize {
         match self.line_starts.binary_search(&offset) {
-            Ok(line) => line + 1, // 精确匹配行首
-            Err(line) => line,    // 在两行之间，binary_search 返回它“应该插入的位置”
+            Ok(line) => line + 1,
+            Err(line) => line,
         }
     }
 
@@ -130,9 +130,8 @@ impl SourceManager {
         let src = fs::read_to_string(&abs_path)?;
         let len = src.len();
 
-        // 分配全局偏移量
         let start_pos = self.next_offset;
-        // 更新下一个文件的起点（+1 是为了避免粘连，虽然没啥必要）
+
         self.next_offset += len + 1;
 
         let file = SourceFile::new(abs_path, src, start_pos);
@@ -145,7 +144,7 @@ impl SourceManager {
     /// 获取文件所在的目录 (核心功能：用于解析相对路径的 import)
     pub fn get_file_dir(&self, id: FileId) -> PathBuf {
         let file = &self.files[id.0];
-        // 如果是文件，取父目录；如果是根目录等特殊情况，这就得小心了
+
         file.path.parent().unwrap_or(Path::new(".")).to_path_buf()
     }
 
@@ -170,14 +169,10 @@ impl SourceManager {
         &self.files[id.0].src[span.as_range()]
     }
 
-    // === 核心新增：通过全局 Span 查找文件和局部位置 ===
     pub fn lookup_source(&self, span: Span) -> Option<(&SourceFile, usize, usize)> {
-        // 二分查找或者线性查找哪个文件包含了 span.start
-        // 因为文件是按顺序加载的，start_pos 是递增的
         for file in &self.files {
             let file_end = file.start_pos + file.src.len();
             if span.start >= file.start_pos && span.start < file_end {
-                // 找到了！计算局部偏移量
                 let local_start = span.start - file.start_pos;
                 let (line, col) = file.lookup_location(local_start);
                 return Some((file, line, col));

@@ -28,7 +28,6 @@ impl Token {
         }
     }
 
-    // 辅助方法：从源码中提取文本
     pub fn text<'a>(&self, source: &'a str) -> &'a str {
         &source[self.span.start..self.span.end]
     }
@@ -77,14 +76,14 @@ macro_rules! define_tokens {
 define_tokens! {
     dynamic {
         Identifier,
-        Integer,      // 123, 0xFF
-        Float,        // 3.14
-        StringLit,    // "hello"
-        CharLit       // 'a'
+        Integer,
+        Float,
+        StringLit,
+        CharLit
     }
 
     keywords {
-        // 类型
+
         "i8"    => I8,    "u8"    => U8,
         "i16"   => I16,   "u16"   => U16,
         "i32"   => I32,   "u32"   => U32,
@@ -93,19 +92,19 @@ define_tokens! {
         "f32"   => F32,   "f64"   => F64,
         "bool"  => Bool,
 
-        // 值
+
         "true"  => True,  "false" => False,
         "self"  => SelfVal,
 
-        // 逻辑与位运算
+
         "and"   => And,
         "or"    => Or,
-        "band"  => BitAnd, // 按位与
-        "bor"   => BitOr,  // 按位或
+        "band"  => BitAnd,
+        "bor"   => BitOr,
         "xor"   => Xor,
         "as"    => As,
 
-        // 声明
+
         "fn"     => Fn,
         "struct" => Struct,
         "union"  => Union,
@@ -122,7 +121,7 @@ define_tokens! {
         "extern" => Extern,
         "cap" => Cap,
 
-        // 流程控制
+
         "if"       => If,
         "else"     => Else,
         "while"    => While,
@@ -131,24 +130,24 @@ define_tokens! {
         "ret"      => Ret,
         "switch"   => Switch,
         "default"  => Default,
-        "for"      => For, // imp for ...
+        "for"      => For,
 
-        // 内置函数
+
         "sizeof" => SizeOf,
         "alignof" => AlignOf,
     }
 
     symbols {
-        // 算术
+
         "+" => Plus,
         "-" => Minus,
         "*" => Star,
         "/" => Slash,
         "%" => Percent,
-        "<<" => Shl, // Shift Left
-        ">>" => Shr, // Shift Right
+        "<<" => Shl,
+        ">>" => Shr,
 
-        // 比较
+
         "==" => EqEq,
         "!=" => NeEq,
         "<"  => Lt,
@@ -156,11 +155,11 @@ define_tokens! {
         ">"  => Gt,
         ">=" => GtEq,
 
-        // 标点 & 其他
+
         "="  => Eq,
         "!"  => Bang,
-        "^"  => Caret,      // 指针/解引用
-        "&"  => Ampersand,  // 取地址后缀
+        "^"  => Caret,
+        "&"  => Ampersand,
 
         "("  => LParen,
         ")"  => RParen,
@@ -175,8 +174,8 @@ define_tokens! {
         "::" => ColonColon,
         ":"  => Colon,
         "->" => Arrow,
-        "|"  => Pipe,        // 用于 switch case 模式多选
-        "..." => DotDotDot, // ...
+        "|"  => Pipe,
+        "..." => DotDotDot,
         "@" => At,
         "#" => Hash,
     }

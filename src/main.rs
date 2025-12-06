@@ -53,16 +53,14 @@ enum ArgEmitType {
 fn main() {
     let args = Args::parse();
 
-    // 1. 确定 Target
     let target_metrics = match args.target {
         Some(s) => TargetMetrics::from_str(&s).unwrap_or_else(|e| {
             eprintln!("Error parsing target triple: {}", e);
             exit(1);
         }),
-        None => TargetMetrics::host(), // 默认使用本机架构
+        None => TargetMetrics::host(),
     };
 
-    // 2. 构造 Config
     let config = CompileConfig {
         source_path: args.input,
         output_path: args.output,
@@ -72,10 +70,9 @@ fn main() {
             ArgEmitType::Obj => EmitType::Object,
         },
         verbose: args.verbose,
-        target: target_metrics, // <--- 传入
+        target: target_metrics,
     };
 
-    // 调用编译器核心
     if let Err(e) = compile(config) {
         eprintln!("Error: {}", e);
         exit(1);

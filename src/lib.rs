@@ -58,25 +58,19 @@ pub struct CompileConfig {
 pub fn compile(config: CompileConfig) -> Result<(), Box<dyn Error>> {
     let mut driver = Driver::new();
 
-    // 1. Driver/Parser 阶段
     let program = match driver.compile_project(config.source_path.clone()) {
         Ok(p) => p,
         Err(fatal_msg) => {
-            // 这种是文件读不到之类的致命错误，直接打印 String
             eprintln!("Fatal Error: {}", fatal_msg);
             return Err("Parsing failed due to fatal error".into());
         }
     };
 
-    // 检查语法错误
-    // 此时 driver.parse_errors 里收集了所有模块的解析错误
     if !driver.parse_errors.is_empty() {
-        // 使用漂亮打印！
         emit_diagnostics(&driver, &driver.parse_errors);
         return Err("Compilation failed due to syntax errors".into());
     }
 
-    // 2. Analyzer 阶段
     let mut analyzer = Analyzer::new(config.target.clone());
     analyzer.analyze_program(&program);
 
@@ -85,7 +79,6 @@ pub fn compile(config: CompileConfig) -> Result<(), Box<dyn Error>> {
         return Err("Compilation failed due to semantic errors".into());
     }
 
-    // 3. Codegen
     let context = Context::create();
     let module_name = config.source_path.file_stem().unwrap().to_str().unwrap();
     let module = context.create_module(module_name);
@@ -94,14 +87,12 @@ pub fn compile(config: CompileConfig) -> Result<(), Box<dyn Error>> {
     let mut codegen = CodeGen::new(&context, &module, &builder, &analyzer.ctx, &program);
     codegen.compile_program(&program);
 
-    // 4. 根据配置输出产物
     handle_output(&module, &config)?;
 
     Ok(())
 }
 
 fn handle_output(module: &Module, config: &CompileConfig) -> Result<(), Box<dyn Error>> {
-    // 确定输出路径
     let output_path = match &config.output_path {
         Some(p) => p.clone(),
         None => {
@@ -139,7 +130,6 @@ fn handle_output(module: &Module, config: &CompileConfig) -> Result<(), Box<dyn 
     Ok(())
 }
 
-// 辅助：生成 .o 文件
 fn emit_object_file(
     module: &Module,
     path: &Path,
@@ -147,25 +137,22 @@ fn emit_object_file(
 ) -> Result<(), String> {
     Target::initialize_all(&InitializationConfig::default());
 
-    // 2. 获取 Target Triple
     let triple_str = target_metrics.triple.to_string();
     let triple = TargetTriple::create(&triple_str);
     module.set_triple(&triple);
 
-    // 3. 创建 Target Machine
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
     let target_machine = target
         .create_target_machine(
             &triple,
-            "generic", // CPU
-            "",        // Features
+            "generic",
+            "",
             OptimizationLevel::Default,
             RelocMode::Default,
             CodeModel::Default,
         )
         .ok_or("Could not create target machine")?;
 
-    // 4. 写文件
     target_machine
         .write_to_file(module, FileType::Object, path)
         .map_err(|e| e.to_string())

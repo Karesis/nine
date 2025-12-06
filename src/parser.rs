@@ -43,7 +43,7 @@ impl<'a> TokenStream<'a> {
         Self {
             lexer,
             buffer: VecDeque::new(),
-            // 初始 span
+
             last_span: Span::new(0, 0),
             base_offset,
         }
@@ -54,12 +54,10 @@ impl<'a> TokenStream<'a> {
         while self.buffer.len() <= n {
             let mut tok = self.lexer.next_token();
 
-            // 入队前做好span map
             if tok.kind != TokenKind::EOF {
                 tok.span.start += self.base_offset;
                 tok.span.end += self.base_offset;
             } else {
-                // EOF 位置是 local len，也加上 base
                 tok.span.start += self.base_offset;
                 tok.span.end += self.base_offset;
             }
@@ -74,7 +72,7 @@ impl<'a> TokenStream<'a> {
     /// 查看第 n 个 Token (不消耗)
     fn peek(&mut self, n: usize) -> Token {
         self.fill(n);
-        // 如果 n 越界（说明已经全是 EOF 了），返回 buffer 里的最后一个（必定是 EOF）
+
         *self
             .buffer
             .get(n)
@@ -93,15 +91,11 @@ impl<'a> TokenStream<'a> {
     }
 }
 
-// ==========================================
-// Parser 主体
-// ==========================================
-
 pub struct Parser<'a> {
     source: &'a str,
     stream: TokenStream<'a>,
     pub errors: Vec<ParseError>,
-    // 专门用于错误恢复：记录上一个被 consume 的 token 类型
+
     previous_kind: TokenKind,
     node_id_counter: &'a mut u32,
 }
@@ -118,11 +112,9 @@ impl<'a> Parser<'a> {
             stream: TokenStream::new(lexer, base_offset),
             errors: Vec::new(),
             previous_kind: TokenKind::EOF,
-            node_id_counter: id_counter, // 绑定引用
+            node_id_counter: id_counter,
         }
     }
-
-    // === Level 0: Stream Wrapper ===
 
     fn peek(&mut self) -> Token {
         self.stream.peek(0)
@@ -132,7 +124,6 @@ impl<'a> Parser<'a> {
         self.peek().kind == kind
     }
 
-    // 支持无限向前看：check_nth(1) == next, check_nth(2) == next next
     fn check_nth(&mut self, n: usize, kind: TokenKind) -> bool {
         self.stream.peek(n).kind == kind
     }
@@ -150,8 +141,6 @@ impl<'a> Parser<'a> {
     fn previous_span(&self) -> Span {
         self.stream.last_span
     }
-
-    // === Level 1: Expect / Consume ===
 
     pub fn consume(&mut self, kind: TokenKind) -> Option<Token> {
         if self.check(kind) {
@@ -190,45 +179,36 @@ impl<'a> Parser<'a> {
     }
 
     pub fn synchronize(&mut self) {
-        // 必须先吃掉那个导致报错的“坏”Token，打破死循环
         self.advance();
 
         while !self.is_at_end() {
-            // A. 检查上一位：如果刚吃掉的是分号，说明上一句结束了，这里是安全的开始
             if self.previous_kind == TokenKind::Semi {
                 return;
             }
 
-            // B. 检查当前位：如果是这些关键字，说明新的一句/声明开始了
             match self.peek().kind {
-                // --- 顶层定义 (Top Level) ---
-                TokenKind::Struct |
-                TokenKind::Union |
-                TokenKind::Enum |
-                TokenKind::Fn |
-                TokenKind::Mod |
-                TokenKind::Use |
-                TokenKind::Imp |
-                TokenKind::Typedef |
-                TokenKind::Typealias |
-                TokenKind::Pub |
-
-                // --- 变量声明 (DeclStmt) ---
-                TokenKind::Set |
-                TokenKind::Mut |
-                TokenKind::Const |
-
-                // --- 流程控制语句 (Statements) ---
-                TokenKind::If |
-                TokenKind::While |
-                TokenKind::Switch |
-                TokenKind::Ret |
-                TokenKind::Break |
-                TokenKind::Continue
-                => {
+                TokenKind::Struct
+                | TokenKind::Union
+                | TokenKind::Enum
+                | TokenKind::Fn
+                | TokenKind::Mod
+                | TokenKind::Use
+                | TokenKind::Imp
+                | TokenKind::Typedef
+                | TokenKind::Typealias
+                | TokenKind::Pub
+                | TokenKind::Set
+                | TokenKind::Mut
+                | TokenKind::Const
+                | TokenKind::If
+                | TokenKind::While
+                | TokenKind::Switch
+                | TokenKind::Ret
+                | TokenKind::Break
+                | TokenKind::Continue => {
                     return;
                 }
-                // 其他情况继续跳过
+
                 _ => {}
             }
 
@@ -238,12 +218,8 @@ impl<'a> Parser<'a> {
 
     /// 获取 Token 对应的源码文本
     pub fn text(&self, token: Token) -> &'a str {
-        // Token 的 span 是全局偏移量 (包含 base_offset)
-        // self.source 是当前文件的局部源码 (从 0 开始)
-        // 所以必须减去 base_offset 才能正确切片
         let offset = self.stream.base_offset;
 
-        // 安全检查
         if token.span.start < offset {
             panic!(
                 "Token start {} is smaller than base offset {}",
@@ -264,7 +240,6 @@ impl<'a> Parser<'a> {
         NodeId(id)
     }
 
-    // 辅助函数：处理字符串转义
     fn unescape_string(&self, raw: &str) -> String {
         let mut result = String::new();
         let mut chars = raw.chars();
@@ -279,12 +254,10 @@ impl<'a> Parser<'a> {
                     Some('"') => result.push('"'),
                     Some('0') => result.push('\0'),
                     Some(other) => {
-                        // 未知转义，保留原样
                         result.push('\\');
                         result.push(other);
                     }
                     None => {
-                        // 结尾是 \，忽略
                         break;
                     }
                 }
@@ -303,28 +276,25 @@ impl<'a> Parser<'a> {
 impl<'a> Parser<'a> {
     /// EBNF: Type -> PointerType | ArrayOrAtom
     pub fn parse_type(&mut self) -> ParseResult<Type> {
-        // PointerType 以 '*' 或 '^' 开头
         if self.check(TokenKind::Star) || self.check(TokenKind::Caret) {
             return self.parse_pointer_type();
         }
 
-        // 否则进入 ArrayOrAtom 分支
         self.parse_array_or_atom()
     }
 
     /// EBNF: PointerType -> ( "*" | "^" ) Type
     fn parse_pointer_type(&mut self) -> ParseResult<Type> {
-        let op_token = self.advance(); // 吃掉 '*' 或 '^'
+        let op_token = self.advance();
         let start = op_token.span.start;
 
-        // 递归调用 parse_type，因为指针可以多层 (**T)
         let inner_type = self.parse_type()?;
         let end = inner_type.span.end;
 
         let mutability = if op_token.kind == TokenKind::Star {
-            Mutability::Mutable // *T
+            Mutability::Mutable
         } else {
-            Mutability::Constant // ^T
+            Mutability::Constant
         };
 
         Ok(Type {
@@ -339,16 +309,11 @@ impl<'a> Parser<'a> {
 
     /// EBNF: ArrayOrAtom -> AtomType { "[" INT "]" }
     fn parse_array_or_atom(&mut self) -> ParseResult<Type> {
-        // 1. 解析基础原子类型
         let mut ty = self.parse_atom_type()?;
 
-        // 2. 循环处理后缀：只要后面是 '['，就说明是数组
         while self.match_token(&[TokenKind::LBracket]) {
-            // EBNF: "[" INT "]"
             let size_token = self.expect(TokenKind::Integer)?;
 
-            // 解析数组大小
-            // TODO: const expr
             let size_str = self.text(size_token);
             let size = size_str.parse::<u64>().map_err(|_| ParseError {
                 expected: "Integer that fits in u64".into(),
@@ -359,8 +324,6 @@ impl<'a> Parser<'a> {
 
             let end_token = self.expect(TokenKind::RBracket)?;
 
-            // 构造新的 ArrayType，包裹住之前的 type
-            // i32[10] -> Array(inner: i32, size: 10)
             let new_span = Span::new(ty.span.start, end_token.span.end);
             ty = Type {
                 id: self.next_id(),
@@ -381,7 +344,6 @@ impl<'a> Parser<'a> {
         let span = token.span;
 
         match token.kind {
-            // 1. 基础类型 (PrimitiveType)
             TokenKind::I8
             | TokenKind::U8
             | TokenKind::I16
@@ -404,13 +366,11 @@ impl<'a> Parser<'a> {
                 })
             }
 
-            // 2. 函数指针类型 (FunctionType) -> "fn" ...
             TokenKind::Fn => self.parse_function_type(),
 
-            // 3. 命名类型 (Path) -> Identifier ...
             TokenKind::Identifier => {
                 let path = self.parse_path()?;
-                let end = path.span.end; // path 包含自己的 span
+                let end = path.span.end;
                 Ok(Type {
                     id: self.next_id(),
                     kind: TypeKind::Named(path),
@@ -418,14 +378,13 @@ impl<'a> Parser<'a> {
                 })
             }
 
-            // 4. 括号类型 "(" Type ")"
             TokenKind::LParen => {
-                self.advance(); // 吃掉 '('
+                self.advance();
                 let inner = self.parse_type()?;
                 let end_token = self.expect(TokenKind::RParen)?;
                 Ok(Type {
                     id: self.next_id(),
-                    kind: inner.kind, // 括号只是改变解析优先级，不改变 AST 结构
+                    kind: inner.kind,
                     span: Span::new(span.start, end_token.span.end),
                 })
             }
@@ -441,12 +400,11 @@ impl<'a> Parser<'a> {
 
     /// EBNF: FunctionType -> "fn" "(" [ TypeList ] ")" [ "->" Type ]
     fn parse_function_type(&mut self) -> ParseResult<Type> {
-        let start_token = self.expect(TokenKind::Fn)?; // 必须是 fn
+        let start_token = self.expect(TokenKind::Fn)?;
         self.expect(TokenKind::LParen)?;
 
         let mut params = Vec::new();
 
-        // 解析参数列表 TypeList -> Type { "," Type }
         if !self.check(TokenKind::RParen) {
             loop {
                 params.push(self.parse_type()?);
@@ -458,9 +416,8 @@ impl<'a> Parser<'a> {
 
         self.expect(TokenKind::RParen)?;
 
-        // 解析可选的返回值 [ "->" Type ]
         let mut ret_type = None;
-        let mut end_pos = self.previous_span().end; // 默认为 ')' 的位置
+        let mut end_pos = self.previous_span().end;
 
         if self.match_token(&[TokenKind::Arrow]) {
             let ret = self.parse_type()?;
@@ -475,24 +432,19 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // === 辅助函数 ===
-
     /// Path 解析：Ident [Generics] { :: Ident [Generics] }
     /// 修改后支持: List#<i32> 或 Map#<String, i32>::Entry
     pub fn parse_path(&mut self) -> ParseResult<Path> {
         let mut segments = Vec::new();
         let start_pos = self.peek().span.start;
 
-        // 1. 第一个 Segment
         let first = self.expect(TokenKind::Identifier)?;
-        let first_args = self.parse_generic_arguments()?; // <--- 插入点
+        let first_args = self.parse_generic_arguments()?;
 
         let mut last_end = first.span.end;
-        // 如果有泛型参数，更新结束位置到 '>'
+
         if let Some(ref args) = first_args {
             if let Some(last_arg) = args.last() {
-                // 这里其实应该取 '>' 的位置，但 Parser helper 里 generic args 已经吃掉了 '>'
-                // 我们可以用 previous_span 获取 '>' 的位置
                 last_end = self.previous_span().end;
             }
         }
@@ -500,13 +452,12 @@ impl<'a> Parser<'a> {
         segments.push(PathSegment {
             name: self.text(first).to_string(),
             generic_args: first_args,
-            span: Span::new(first.span.start, last_end), // <--- 修改：Identifier -> PathSegment
+            span: Span::new(first.span.start, last_end),
         });
 
-        // 2. 循环解析 :: Ident [Generics]
         while self.match_token(&[TokenKind::ColonColon]) {
             let seg = self.expect(TokenKind::Identifier)?;
-            let seg_args = self.parse_generic_arguments()?; // <--- 插入点
+            let seg_args = self.parse_generic_arguments()?;
 
             let mut seg_end = seg.span.end;
             if let Some(_) = seg_args {
@@ -528,14 +479,9 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // ==========================================
-    // 泛型解析辅助函数
-    // ==========================================
-
     /// 解析泛型参数定义 (Definition Site)
     /// 语法: "#" "<" GenericParam { "," GenericParam } ">"
     /// 例如: #<T, U: Printable>
-    // src/parser.rs
 
     fn parse_generic_params(&mut self) -> ParseResult<Vec<GenericParam>> {
         if !self.check(TokenKind::Hash) {
@@ -545,8 +491,8 @@ impl<'a> Parser<'a> {
             return Ok(Vec::new());
         }
 
-        self.advance(); // #
-        self.expect(TokenKind::Lt)?; // <
+        self.advance();
+        self.expect(TokenKind::Lt)?;
 
         let mut params = Vec::new();
 
@@ -557,11 +503,9 @@ impl<'a> Parser<'a> {
                 span: name_tok.span,
             };
 
-            // 解析约束: T: Cap + std::path::Path
             let mut constraints = Vec::new();
             if self.match_token(&[TokenKind::Colon]) {
                 loop {
-                    // 【核心修改】调用 parse_path，支持 List#<i32> 或 std::io::Read
                     let cap_path = self.parse_path()?;
                     constraints.push(cap_path);
 
@@ -571,7 +515,6 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            // 计算 span (逻辑不变)
             let span = if let Some(last_cap) = constraints.last() {
                 Span::new(name.span.start, last_cap.span.end)
             } else {
@@ -598,17 +541,15 @@ impl<'a> Parser<'a> {
     /// 语法: "#" "<" Type { "," Type } ">"
     /// 例如: #<i32, String>
     fn parse_generic_arguments(&mut self) -> ParseResult<Option<Vec<Type>>> {
-        // 同样检查 #<
         if !self.check(TokenKind::Hash) || !self.check_nth(1, TokenKind::Lt) {
             return Ok(None);
         }
 
-        self.advance(); // '#'
-        self.expect(TokenKind::Lt)?; // '<'
+        self.advance();
+        self.expect(TokenKind::Lt)?;
 
         let mut args = Vec::new();
 
-        // 循环条件：增加 && !self.check(TokenKind::Shr)
         while !self.check(TokenKind::Gt) && !self.check(TokenKind::Shr) && !self.is_at_end() {
             args.push(self.parse_type()?);
 
@@ -617,7 +558,6 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // 【修改 2】使用新函数来结束泛型实参列表
         self.consume_generic_closer()?;
 
         Ok(Some(args))
@@ -626,48 +566,33 @@ impl<'a> Parser<'a> {
     /// 专门用于消耗泛型结束符 '>'
     /// 如果遇到 '>>' (Shr)，会将其拆分为两个 '>'，消耗一个，把另一个塞回流中
     fn consume_generic_closer(&mut self) -> ParseResult<Token> {
-        // 情况 1: 刚好是 '>'
         if self.check(TokenKind::Gt) {
             return self.advance_with_check();
         }
 
-        // 情况 2: 是 '>>' (Shr)
         if self.check(TokenKind::Shr) {
-            // 1. 消耗当前的 Shr Token
-            // 注意：我们要手动修改它，所以先拿到它
             let mut token = self.advance_with_check()?;
 
-            // 2. 把当前这个 Token "变性" 为 Gt
             token.kind = TokenKind::Gt;
-            // 修改 span: 比如原来是 10..12 (长度2)，现在变成 10..11 (长度1)
+
             let original_end = token.span.end;
             token.span.end -= 1;
 
-            // 3. 凭空制造第二个 Gt Token
             let second_gt = Token {
                 kind: TokenKind::Gt,
-                span: Span::new(token.span.end, original_end), // 11..12
+                span: Span::new(token.span.end, original_end),
             };
 
-            // 4. 【魔法】把第二个 Gt 塞回 TokenStream 的缓冲区头部
-            // 这样下一次 peek/advance 就会看到这个新的 Gt
             self.stream.buffer.push_front(second_gt);
 
-            // 修正 Parser 记录的 previous_kind，防止 synchronize 误判
             self.previous_kind = TokenKind::Gt;
 
             return Ok(token);
         }
 
-        // 还可以支持 '>>>' 或 '>=' 等，如果需要的话
-        // 目前只处理 >> 即可
-
-        // 如果都不是，报错
         self.expect(TokenKind::Gt)
     }
 
-    // 辅助：把 self.advance() 稍微包装一下以配合上面的 Result 返回值签名
-    // (你原来的 advance 返回 Token，expect 返回 Result<Token>)
     fn advance_with_check(&mut self) -> ParseResult<Token> {
         Ok(self.advance())
     }
@@ -694,10 +619,6 @@ impl<'a> Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    // ==========================================
-    // 表达式解析
-    // ==========================================
-
     /// 入口：Expression -> LogicOr
     pub fn parse_expr(&mut self) -> ParseResult<Expression> {
         self.parse_logic_or()
@@ -806,7 +727,6 @@ impl<'a> Parser<'a> {
         Ok(lhs)
     }
 
-    // Level 5: Shift -> Additive { ("<"|"<="|">"|">=") Additive }
     fn parse_shift(&mut self) -> ParseResult<Expression> {
         let mut lhs = self.parse_additive()?;
 
@@ -899,7 +819,6 @@ impl<'a> Parser<'a> {
 
     /// Level 8: Unary -> ("-" | "!") Unary | Postfix
     fn parse_unary(&mut self) -> ParseResult<Expression> {
-        // 检查前缀运算符
         if self.match_token(&[TokenKind::Minus, TokenKind::Bang]) {
             let start = self.previous_span().start;
             let op = match self.previous_kind {
@@ -908,7 +827,6 @@ impl<'a> Parser<'a> {
                 _ => unreachable!(),
             };
 
-            // 递归解析右侧 (允许连续: !!x, --x)
             let operand = self.parse_unary()?;
             let span = Span::new(start, operand.span.end);
 
@@ -922,7 +840,6 @@ impl<'a> Parser<'a> {
             });
         }
 
-        // 如果不是前缀，解析后缀/Primary
         self.parse_postfix()
     }
 
@@ -932,7 +849,6 @@ impl<'a> Parser<'a> {
 
         loop {
             if self.match_token(&[TokenKind::LParen]) {
-                // 1. 函数调用: expr(args)
                 let args = self.parse_arguments()?;
                 let end_token = self.expect(TokenKind::RParen)?;
                 let span = Span::new(expr.span.start, end_token.span.end);
@@ -946,7 +862,6 @@ impl<'a> Parser<'a> {
                     span,
                 };
             } else if self.match_token(&[TokenKind::LBracket]) {
-                // 2. 索引: expr[index]
                 let index = self.parse_expr()?;
                 let end_token = self.expect(TokenKind::RBracket)?;
                 let span = Span::new(expr.span.start, end_token.span.end);
@@ -960,16 +875,14 @@ impl<'a> Parser<'a> {
                     span,
                 };
             } else if self.match_token(&[TokenKind::Dot]) {
-                // 3. 字段访问: expr.ident
                 let name = self.expect(TokenKind::Identifier)?;
                 let ident = Identifier {
                     name: self.text(name).to_string(),
                     span: name.span,
                 };
 
-                // 检查是否是方法调用: expr.method(...)
                 if self.check(TokenKind::LParen) {
-                    self.advance(); // 吃掉 '('
+                    self.advance();
                     let args = self.parse_arguments()?;
                     let end_token = self.expect(TokenKind::RParen)?;
                     let span = Span::new(expr.span.start, end_token.span.end);
@@ -984,7 +897,6 @@ impl<'a> Parser<'a> {
                         span,
                     };
                 } else {
-                    // 只是字段访问
                     let span = Span::new(expr.span.start, name.span.end);
                     expr = Expression {
                         id: self.next_id(),
@@ -996,7 +908,6 @@ impl<'a> Parser<'a> {
                     };
                 }
             } else if self.match_token(&[TokenKind::As]) {
-                // 4. 类型转换: expr as Type
                 let target_type = self.parse_type()?;
                 let span = Span::new(expr.span.start, target_type.span.end);
 
@@ -1009,7 +920,6 @@ impl<'a> Parser<'a> {
                     span,
                 };
             } else if self.match_token(&[TokenKind::Caret]) {
-                // 5. 后缀解引用: ptr^
                 let span = Span::new(expr.span.start, self.previous_span().end);
                 expr = Expression {
                     id: self.next_id(),
@@ -1020,7 +930,6 @@ impl<'a> Parser<'a> {
                     span,
                 };
             } else if self.match_token(&[TokenKind::Ampersand]) {
-                // 6. 后缀取地址: val&
                 let span = Span::new(expr.span.start, self.previous_span().end);
                 expr = Expression {
                     id: self.next_id(),
@@ -1031,7 +940,6 @@ impl<'a> Parser<'a> {
                     span,
                 };
             } else if self.match_token(&[TokenKind::ColonColon]) {
-                // 7. 命名空间访问 (EBNF: :: Identifier)
                 let name = self.expect(TokenKind::Identifier)?;
                 let ident = Identifier {
                     name: self.text(name).to_string(),
@@ -1039,7 +947,6 @@ impl<'a> Parser<'a> {
                 };
                 let span = Span::new(expr.span.start, name.span.end);
 
-                // 明确使用 StaticAccess
                 expr = Expression {
                     id: self.next_id(),
                     kind: ExpressionKind::StaticAccess {
@@ -1060,7 +967,6 @@ impl<'a> Parser<'a> {
         let token = self.peek();
 
         match token.kind {
-            // 字面量
             TokenKind::Integer
             | TokenKind::Float
             | TokenKind::StringLit
@@ -1076,7 +982,6 @@ impl<'a> Parser<'a> {
                 })
             }
 
-            // 括号表达式
             TokenKind::LParen => {
                 self.advance();
                 let expr = self.parse_expr()?;
@@ -1084,17 +989,12 @@ impl<'a> Parser<'a> {
                 Ok(expr)
             }
 
-            // 路径 OR 结构体初始化
-            // Path:   std::io::File
-            // Struct: std::io::File { fd: 1 }
             TokenKind::Identifier => {
                 let path = self.parse_path()?;
 
-                // 如果后面跟着 '{'，则是结构体初始化
                 if self.check(TokenKind::LBrace) {
                     self.parse_struct_literal(path)
                 } else {
-                    // 否则就是纯路径（变量名/枚举值）
                     Ok(Expression {
                         id: self.next_id(),
                         kind: ExpressionKind::Path(path.clone()),
@@ -1103,19 +1003,16 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            //  self 作为表达式
-            //  self 作为表达式
             TokenKind::SelfVal => {
                 let tok = self.advance();
                 Ok(Expression {
                     id: self.next_id(),
-                    // 将 self 视为名为 "self" 的 Path
+
                     kind: ExpressionKind::Path(Path {
                         id: self.next_id(),
                         segments: vec![PathSegment {
-                            // <--- 修改：构造 PathSegment
                             name: "self".to_string(),
-                            generic_args: None, // self 本身通常不带泛型参数
+                            generic_args: None,
                             span: tok.span,
                         }],
                         span: tok.span,
@@ -1124,11 +1021,9 @@ impl<'a> Parser<'a> {
                 })
             }
 
-            // 内置函数
             TokenKind::At => {
-                let start = self.advance().span.start; // 吃掉 '@'
+                let start = self.advance().span.start;
 
-                // @sizeof(T)
                 if self.match_token(&[TokenKind::SizeOf]) {
                     self.expect(TokenKind::LParen)?;
                     let target_type = self.parse_type()?;
@@ -1139,8 +1034,6 @@ impl<'a> Parser<'a> {
                         kind: ExpressionKind::SizeOf(target_type),
                         span: Span::new(start, end),
                     })
-
-                // @alignof(T)
                 } else if self.match_token(&[TokenKind::AlignOf]) {
                     self.expect(TokenKind::LParen)?;
                     let target_type = self.parse_type()?;
@@ -1152,7 +1045,6 @@ impl<'a> Parser<'a> {
                         span: Span::new(start, end),
                     })
                 } else {
-                    // 既不是 sizeof 也不是 alignof
                     return Err(ParseError {
                         expected: "sizeof or alignof".into(),
                         found: self.peek().kind,
@@ -1169,10 +1061,6 @@ impl<'a> Parser<'a> {
             }),
         }
     }
-
-    // ==========================================
-    // 表达式辅助函数
-    // ==========================================
 
     /// 解析函数参数列表: expr, expr, expr (不包含括号)
     fn parse_arguments(&mut self) -> ParseResult<Vec<Expression>> {
@@ -1228,10 +1116,8 @@ impl<'a> Parser<'a> {
             TokenKind::True => Ok(Literal::Boolean(true)),
             TokenKind::False => Ok(Literal::Boolean(false)),
             TokenKind::Integer => {
-                // 去掉下划线
                 let clean_text = text.replace('_', "");
 
-                // 判断进制
                 let (num_str, radix) =
                     if clean_text.starts_with("0x") || clean_text.starts_with("0X") {
                         (&clean_text[2..], 16)
@@ -1257,23 +1143,17 @@ impl<'a> Parser<'a> {
                 Ok(Literal::Float(val))
             }
             TokenKind::StringLit => {
-                // text 是包含引号的原始文本，例如 "hello\n"
-                // 1. 去掉首尾引号
                 let content = &text[1..text.len() - 1];
-                // 2. 进行转义处理
+
                 let unescaped = self.unescape_string(content);
-                // 3. 存入 AST
+
                 Ok(Literal::String(unescaped))
             }
             TokenKind::CharLit => {
-                // 1. 去掉首尾的单引号 '...'
                 let content = &text[1..text.len() - 1];
 
-                // 2. 调用字符串反转义函数
                 let unescaped_str = self.unescape_string(content);
 
-                // 3. 取出第一个字符
-                // 如果是空字符 '' 给个 \0
                 let c = unescaped_str.chars().next().unwrap_or('\0');
 
                 Ok(Literal::Char(c))
@@ -1284,21 +1164,14 @@ impl<'a> Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    // ==========================================
-    // 语句解析
-    // ==========================================
-
     /// Statement -> Decl | Assign | Call | If | While | Break | Continue | Ret | Block | Switch
     pub fn parse_statement(&mut self) -> ParseResult<Statement> {
-        // 1. 变量声明 (Set / Mut / Const)
         if self.match_token(&[TokenKind::Set, TokenKind::Mut, TokenKind::Const]) {
-            let modifier = self.previous_kind; // match_token 已经 advance 了
+            let modifier = self.previous_kind;
             return self.parse_decl_stmt(modifier);
         }
 
-        // 2. 块 (Block)
         if self.check(TokenKind::LBrace) {
-            // parse_block 内部已经处理了 { } 的消耗和 Span 的计算
             let block = self.parse_block()?;
             let span = block.span;
 
@@ -1309,7 +1182,6 @@ impl<'a> Parser<'a> {
             });
         }
 
-        // 3. 流程控制
         if self.match_token(&[TokenKind::If]) {
             return self.parse_if_stmt();
         }
@@ -1343,9 +1215,6 @@ impl<'a> Parser<'a> {
             });
         }
 
-        // 4. 剩下的歧义：AssignStmt vs CallStmt
-        // Assign: Postfix "=" Expr ";"
-        // Call:   Postfix ";"
         self.parse_assign_or_call_stmt()
     }
 
@@ -1374,36 +1243,30 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // DeclStmt -> VarModifier Identifier ":" Type [ "=" Expression ] ";"
     fn parse_decl_stmt(&mut self, modifier_kind: TokenKind) -> ParseResult<Statement> {
         let start = self.previous_span().start;
 
-        // 1. Modifier
         let modifier = match modifier_kind {
-            TokenKind::Set => Mutability::Immutable, // set x: T;
+            TokenKind::Set => Mutability::Immutable,
             TokenKind::Mut => Mutability::Mutable,
             TokenKind::Const => Mutability::Constant,
             _ => unreachable!(),
         };
 
-        // 2. Identifier
         let name_tok = self.expect(TokenKind::Identifier)?;
         let name = Identifier {
             name: self.text(name_tok).to_string(),
             span: name_tok.span,
         };
 
-        // 3. Type
         self.expect(TokenKind::Colon)?;
         let ty = self.parse_type()?;
 
-        // 4. Initializer (Optional)
         let mut initializer = None;
         if self.match_token(&[TokenKind::Eq]) {
             initializer = Some(self.parse_expr()?);
         }
 
-        // 5. Semicolon
         let end_tok = self.expect(TokenKind::Semi)?;
 
         Ok(Statement {
@@ -1418,7 +1281,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // IfStmt -> "if" "(" Expression ")" Block [ "else" ( Block | IfStmt ) ]
     fn parse_if_stmt(&mut self) -> ParseResult<Statement> {
         let start = self.previous_span().start;
 
@@ -1431,7 +1293,7 @@ impl<'a> Parser<'a> {
         let mut else_branch = None;
         if self.match_token(&[TokenKind::Else]) {
             if self.check(TokenKind::If) {
-                self.advance(); // consume 'if'
+                self.advance();
                 else_branch = Some(Box::new(self.parse_if_stmt()?));
             } else {
                 let block = self.parse_block()?;
@@ -1444,7 +1306,6 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // 计算整个 if 的 span
         let end = else_branch
             .as_ref()
             .map(|s| s.span.end)
@@ -1461,7 +1322,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // WhileStmt -> "while" "(" Expression ")" [ ":" DeclStmt ] Block
     fn parse_while_stmt(&mut self) -> ParseResult<Statement> {
         let start = self.previous_span().start;
 
@@ -1469,7 +1329,6 @@ impl<'a> Parser<'a> {
         let condition = self.parse_expr()?;
         self.expect(TokenKind::RParen)?;
 
-        // Optional Loop Variable: [ ":" DeclStmt ]
         let mut init_statement = None;
         if self.match_token(&[TokenKind::Colon]) {
             if self.match_token(&[TokenKind::Set, TokenKind::Mut, TokenKind::Const]) {
@@ -1487,7 +1346,6 @@ impl<'a> Parser<'a> {
 
         let body = self.parse_block()?;
 
-        // 结束位置直接取 body.span.end
         let end = body.span.end;
 
         Ok(Statement {
@@ -1495,13 +1353,12 @@ impl<'a> Parser<'a> {
             kind: StatementKind::While {
                 condition,
                 init_statement,
-                body, // 类型匹配：Block
+                body,
             },
             span: Span::new(start, end),
         })
     }
 
-    // ReturnStmt -> "ret" [ Expression ] ";"
     fn parse_return_stmt(&mut self) -> ParseResult<Statement> {
         let start = self.previous_span().start;
 
@@ -1519,7 +1376,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // SwitchStmt -> "switch" "(" Expression ")" "{" { SwitchCase } [ DefaultCase ] "}"
     fn parse_switch_stmt(&mut self) -> ParseResult<Statement> {
         let start = self.previous_span().start;
 
@@ -1533,7 +1389,6 @@ impl<'a> Parser<'a> {
         let mut default_case = None;
 
         while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-            // 检查是不是 default 分支
             if self.match_token(&[TokenKind::Default]) {
                 if default_case.is_some() {
                     return Err(ParseError {
@@ -1545,13 +1400,11 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(TokenKind::Arrow)?;
 
-                // 解析语句 (可能是 Block，也可能是单行)
                 let stmt = self.parse_statement()?;
 
                 let block = self.statement_to_block(stmt);
                 default_case = Some(block);
             } else {
-                // 普通 Case
                 let mut patterns = Vec::new();
                 let first = self.parse_expr()?;
                 patterns.push(first.clone());
@@ -1565,7 +1418,6 @@ impl<'a> Parser<'a> {
                 let stmt = self.parse_statement()?;
                 let block = self.statement_to_block(stmt);
 
-                // Case 的 Span 包含 patterns + body
                 let span = Span::new(pattern_start, block.span.end);
 
                 cases.push(SwitchCase {
@@ -1589,35 +1441,24 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // 辅助函数：将任意 Statement 转换为 Block
-    // 如果它本来就是 Block，直接拆包取出；
-    // 如果它是单行语句，包装成 Block。
     fn statement_to_block(&mut self, stmt: Statement) -> Block {
         match stmt.kind {
-            // 如果本身就是 Block (即写了 { ... })，直接用里面的 Block 结构
             StatementKind::Block(b) => b,
 
-            // 否则 (-> ret 0;)，人工构造成 Block
             _ => Block {
                 id: self.next_id(),
-                span: stmt.span, // Block 的范围就是这单行语句的范围
+                span: stmt.span,
                 stmts: vec![stmt],
             },
         }
     }
 
-    // 处理 AssignStmt 或 CallStmt
-    // 共同前缀：Postfix
     fn parse_assign_or_call_stmt(&mut self) -> ParseResult<Statement> {
         let start = self.peek().span.start;
 
-        // 严格解析Postfix
-        // `a + b = 1;` 在语法层面就会报错
         let expr = self.parse_postfix()?;
 
-        // 2. 分歧判断
         if self.match_token(&[TokenKind::Eq]) {
-            // 是赋值: Postfix "=" Expression ";"
             let rhs = self.parse_expr()?;
             let end_tok = self.expect(TokenKind::Semi)?;
 
@@ -1627,7 +1468,6 @@ impl<'a> Parser<'a> {
                 span: Span::new(start, end_tok.span.end),
             })
         } else {
-            // 是调用/表达式语句: Postfix ";"
             let end_tok = self.expect(TokenKind::Semi)?;
             Ok(Statement {
                 id: self.next_id(),
@@ -1639,10 +1479,6 @@ impl<'a> Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    // ==========================================
-    // 顶层定义解析
-    // ==========================================
-
     /// Program -> { TopLevelDecl }
     pub fn parse_program(&mut self) -> Program {
         let mut items = Vec::new();
@@ -1660,7 +1496,6 @@ impl<'a> Parser<'a> {
 
     /// TopLevelDecl 分发
     fn parse_top_level(&mut self) -> ParseResult<Item> {
-        // 1. 处理 pub
         let is_pub = self.match_token(&[TokenKind::Pub]);
         let start_span = if is_pub {
             self.previous_span()
@@ -1668,7 +1503,6 @@ impl<'a> Parser<'a> {
             self.peek().span
         };
 
-        // 2. 处理 extern
         if self.match_token(&[TokenKind::Extern]) {
             let start = if is_pub {
                 start_span.start
@@ -1676,7 +1510,6 @@ impl<'a> Parser<'a> {
                 self.previous_span().start
             };
 
-            // Case A: extern fn ...
             if self.check(TokenKind::Fn) {
                 let func_def = self.parse_function_definition(is_pub, true, start, None)?;
                 return Ok(Item {
@@ -1684,16 +1517,7 @@ impl<'a> Parser<'a> {
                     span: func_def.span,
                     kind: ItemKind::FunctionDecl(func_def),
                 });
-            }
-            // Case B: extern var name: Type;
-            // 复用 parse_global_variable 的逻辑，但需要标记它是 extern
-            // 我们可以稍微 hack 一下：extern var 其实就是没有初始化的 global variable
-            // 但我们需要 ItemKind::GlobalVariable 能够区分是否是 extern
-            else if self.match_token(&[TokenKind::Set, TokenKind::Mut, TokenKind::Const]) {
-                // 这里需要小心：parse_global_variable 目前强制要求初始化（除非是 mut）
-                // 且 parse_global_variable 内部不处理 extern 逻辑。
-                // 为了简单，我们手动解析一下 extern var
-
+            } else if self.match_token(&[TokenKind::Set, TokenKind::Mut, TokenKind::Const]) {
                 let modifier = match self.previous_kind {
                     TokenKind::Set => Mutability::Immutable,
                     TokenKind::Mut => Mutability::Mutable,
@@ -1706,16 +1530,14 @@ impl<'a> Parser<'a> {
                 let ty = self.parse_type()?;
                 let end = self.expect(TokenKind::Semi)?.span.end;
 
-                // 我们需要 ItemKind 增加一个 ExternVariable 或者复用 GlobalVariable 但带标记
-                // 建议复用 GlobalVariable，但在 GlobalDefinition 结构体加个 is_extern
                 return Ok(Item {
                     id: self.next_id(),
                     kind: ItemKind::GlobalVariable(GlobalDefinition {
                         name,
                         ty,
                         modifier,
-                        initializer: None, // extern 变量没有初始化器
-                        is_extern: true,   // <--- 需要在 AST 中添加这个字段！
+                        initializer: None,
+                        is_extern: true,
                         span: Span::new(start, end),
                         is_pub,
                     }),
@@ -1731,7 +1553,6 @@ impl<'a> Parser<'a> {
             });
         }
 
-        // 3. 根据关键字分发
         let token = self.peek();
         match token.kind {
             TokenKind::Mod => self.parse_module_decl(is_pub, start_span.start),
@@ -1769,7 +1590,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // ModuleDecl -> [ "pub" ] "mod" Identifier ";"
     fn parse_module_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Mod)?;
         let name = self.parse_identifier()?;
@@ -1786,7 +1606,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // ImportDecl -> [ "pub" ] "use" Path [ "as" Identifier ] ";"
     fn parse_import_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Use)?;
         let path = self.parse_path()?;
@@ -1809,7 +1628,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // TypedefDecl -> "typedef" Identifier "=" Type ";"
     fn parse_typedef_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Typedef)?;
         let name = self.parse_identifier()?;
@@ -1828,7 +1646,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // TypeAliasDecl -> "typealias" Identifier "=" Type ";"
     fn parse_typealias_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Typealias)?;
         let name = self.parse_identifier()?;
@@ -1847,9 +1664,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // FnDecl -> ["pub"] "fn" Identifier "(" [ ParamList ] ")" [ "->" Type ] Block
     fn parse_fn_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
-        // 调用通用的函数解析器，allow_self = false, is_extern = false
         let func_def = self.parse_function_definition(is_pub, false, start, None)?;
 
         Ok(Item {
@@ -1859,13 +1674,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // ==========================================
-    // 结构体/联合体解析
-    // ==========================================
-
-    // StructDecl -> "struct" [ "(" INT ")" ] Identifier "{" ... "}"
     fn parse_struct_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
-        // 调用通用解析逻辑，传入 Struct 关键字
         let def = self.parse_record_definition(TokenKind::Struct, start, is_pub)?;
         let end = def.span.end;
 
@@ -1876,9 +1685,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // UnionDecl -> "union" [ "(" INT ")" ] Identifier "{" ... "}"
     fn parse_union_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
-        // 调用通用解析逻辑，传入 Union 关键字
         let def = self.parse_record_definition(TokenKind::Union, start, is_pub)?;
         let end = def.span.end;
 
@@ -1908,7 +1715,6 @@ impl<'a> Parser<'a> {
         let mut static_methods = Vec::new();
 
         while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-            // 1. 检查是不是静态方法 (fn 或 pub fn)
             let is_fn = self.check(TokenKind::Fn)
                 || (self.check(TokenKind::Pub) && self.check_nth(1, TokenKind::Fn));
 
@@ -1927,7 +1733,6 @@ impl<'a> Parser<'a> {
                     None,
                 )?);
             } else {
-                // 2. 如果不是方法，那就是数据成员
                 items.push(parse_item(self)?);
             }
         }
@@ -1936,8 +1741,6 @@ impl<'a> Parser<'a> {
         Ok((items, static_methods, Span::new(start, end)))
     }
 
-    // 公共逻辑：解析类似 Struct 的定义
-    // 负责解析: Keyword [Alignment] Identifier "{" { Members } "}"
     fn parse_record_definition(
         &mut self,
         keyword: TokenKind,
@@ -1946,14 +1749,11 @@ impl<'a> Parser<'a> {
     ) -> ParseResult<StructDefinition> {
         self.expect(keyword)?;
 
-        // 1. Header 部分
         let alignment = self.parse_optional_alignment()?;
         let name = self.parse_identifier()?;
 
-        // <--- 插入点：解析泛型参数 definition --->
         let generics = self.parse_generic_params()?;
 
-        // 2. Body 部分 (使用通用解析器)
         let (fields, static_methods, body_span) = self.parse_mixed_body(|p| {
             let field_name = p.parse_identifier()?;
             p.expect(TokenKind::Colon)?;
@@ -1969,7 +1769,7 @@ impl<'a> Parser<'a> {
 
         Ok(StructDefinition {
             name,
-            generics, // <--- 存入
+            generics,
             fields,
             static_methods,
             alignment,
@@ -1978,8 +1778,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // 辅助函数：解析可选对齐
-    // [ "(" INT ")" ]
     fn parse_optional_alignment(&mut self) -> ParseResult<Option<u32>> {
         if self.match_token(&[TokenKind::LParen]) {
             let int_tok = self.expect(TokenKind::Integer)?;
@@ -2001,7 +1799,6 @@ impl<'a> Parser<'a> {
                 });
             }
 
-            // 额外检查：是否是 2 的幂 (x & (x-1) == 0 表示只有一位是1)
             if (val & (val - 1)) != 0 {
                 return Err(ParseError {
                     expected: "Power of 2".into(),
@@ -2018,15 +1815,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // EnumDecl -> "enum" Identifier [Generics] [ ":" IntType ] "{" { EnumMember } "}"
     fn parse_enum_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Enum)?;
         let name = self.parse_identifier()?;
 
-        // <--- 修改点：这里插入泛型解析 --->
         let generics = self.parse_generic_params()?;
 
-        // 1. Header 部分: [ ":" IntType ]
         let mut underlying_type = None;
         if self.match_token(&[TokenKind::Colon]) {
             let ty = self.parse_type()?;
@@ -2042,7 +1836,6 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // 2. Body 部分 (使用通用解析器)
         let (variants, static_methods, body_span) = self.parse_mixed_body(|p| {
             let v_name = p.parse_identifier()?;
             let mut value = None;
@@ -2063,7 +1856,7 @@ impl<'a> Parser<'a> {
             id: self.next_id(),
             kind: ItemKind::EnumDecl(EnumDefinition {
                 name,
-                generics, // <--- 记得存入 AST (需确保 AST 结构体里有这个字段)
+                generics,
                 underlying_type,
                 variants,
                 static_methods,
@@ -2074,7 +1867,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // CapDecl -> "cap" Identifier "{" { MethodDecl } "}"
     fn parse_cap_decl(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Cap)?;
         let name = self.parse_identifier()?;
@@ -2092,12 +1884,7 @@ impl<'a> Parser<'a> {
                 self.peek().span.start
             };
 
-            methods.push(self.parse_function_definition(
-                is_method_pub,
-                false, // is_extern
-                fn_start,
-                None, // cap 定义时不涉及 self 的具体类型
-            )?);
+            methods.push(self.parse_function_definition(is_method_pub, false, fn_start, None)?);
         }
 
         let end = self.expect(TokenKind::RBrace)?.span.end;
@@ -2115,16 +1902,13 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // TypeImpDecl -> "imp" "for" Type "{" { MethodDecl } "}"
     fn parse_imp_decl(&mut self, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Imp)?;
 
-        // <--- 插入点：解析 imp 自身的泛型参数 (imp#<T> for ...) --->
         let generics = self.parse_generic_params()?;
 
         self.expect(TokenKind::For)?;
 
-        // 1. 解析目标类型 (此时拥有所有权)
         let target_type = self.parse_type()?;
 
         self.expect(TokenKind::LBrace)?;
@@ -2151,8 +1935,8 @@ impl<'a> Parser<'a> {
         Ok(Item {
             id: self.next_id(),
             kind: ItemKind::Implementation {
-                generics,         // <--- 存入
-                implements: None, // 目前没有 Trait/Cap 实现，只是 imp for Type
+                generics,
+                implements: None,
                 target_type,
                 methods,
             },
@@ -2160,9 +1944,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // 解析逻辑
     fn parse_global_variable(&mut self, is_pub: bool, start: usize) -> ParseResult<Item> {
-        // 1. Modifier
         let modifier = if self.match_token(&[TokenKind::Mut]) {
             Mutability::Mutable
         } else if self.match_token(&[TokenKind::Set]) {
@@ -2173,14 +1955,11 @@ impl<'a> Parser<'a> {
             unreachable!()
         };
 
-        // 2. Name
         let name = self.parse_identifier()?;
 
-        // 3. Type (全局变量强制写类型)
         self.expect(TokenKind::Colon)?;
         let ty = self.parse_type()?;
 
-        // 4. Initializer
         let mut initializer = None;
         if self.match_token(&[TokenKind::Eq]) {
             initializer = Some(self.parse_expr()?);
@@ -2203,10 +1982,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // ==========================================
-    // 函数解析核心
-    // ==========================================
-
     /// 解析函数定义
     /// ctx_type: 如果是 imp 块的方法，这里包含 impl 的目标类型；否则为 None
     fn parse_function_definition(
@@ -2219,12 +1994,10 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::Fn)?;
         let name = self.parse_identifier()?;
 
-        // <--- 插入点：解析泛型参数 definition (fn foo#<T>(...)) --->
         let generics = self.parse_generic_params()?;
 
         self.expect(TokenKind::LParen)?;
 
-        // ... 后面的逻辑保持不变 ...
         let (params, is_variadic) = self.parse_param_list(ctx_type)?;
         self.expect(TokenKind::RParen)?;
 
@@ -2251,7 +2024,7 @@ impl<'a> Parser<'a> {
         Ok(FunctionDefinition {
             id: self.next_id(),
             name,
-            generics, // <--- 存入
+            generics,
             params,
             return_type,
             body,
@@ -2274,15 +2047,12 @@ impl<'a> Parser<'a> {
         }
 
         loop {
-            // 1. 检查变长参数 "..." (DotDotDot)
-            // 变长参数必须放在最后，所以解析到它就标记并退出循环
             if self.match_token(&[TokenKind::DotDotDot]) {
                 is_variadic = true;
-                // "..." 后面不能再有参数了，直接结束
+
                 break;
             }
 
-            // 2. 检查 self
             let is_self_start = self.check(TokenKind::SelfVal)
                 || ((self.check(TokenKind::Mut) || self.check(TokenKind::Const))
                     && self.check_nth(1, TokenKind::SelfVal));
@@ -2328,7 +2098,6 @@ impl<'a> Parser<'a> {
                     is_self: true,
                 });
             } else {
-                // 3. 普通参数解析
                 let mut modifier = Mutability::Immutable;
                 if self.match_token(&[TokenKind::Mut]) {
                     modifier = Mutability::Mutable;
@@ -2349,7 +2118,6 @@ impl<'a> Parser<'a> {
                 });
             }
 
-            // 4. 检查逗号
             if !self.match_token(&[TokenKind::Comma]) {
                 break;
             }
@@ -2358,7 +2126,6 @@ impl<'a> Parser<'a> {
         Ok((params, is_variadic))
     }
 
-    // 辅助函数: parse_identifier
     fn parse_identifier(&mut self) -> ParseResult<Identifier> {
         let tok = self.expect(TokenKind::Identifier)?;
         Ok(Identifier {

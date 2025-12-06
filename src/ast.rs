@@ -29,8 +29,8 @@ pub struct Identifier {
 #[derive(Debug, Clone)]
 pub struct GenericParam {
     pub id: NodeId,
-    pub name: Identifier,       // "T"
-    pub constraints: Vec<Path>, // ["Printable", "Clone"]
+    pub name: Identifier,
+    pub constraints: Vec<Path>,
     pub span: Span,
 }
 
@@ -40,7 +40,7 @@ pub struct GenericParam {
 pub struct CapDefinition {
     pub name: Identifier,
     pub generics: Vec<GenericParam>,
-    pub methods: Vec<FunctionDefinition>, // 只有签名，body 为 None
+    pub methods: Vec<FunctionDefinition>,
     pub is_pub: bool,
     pub span: Span,
 }
@@ -49,7 +49,7 @@ pub struct CapDefinition {
 #[derive(Debug, Clone)]
 pub struct PathSegment {
     pub name: String,
-    pub generic_args: Option<Vec<Type>>, // <--- 泛型实参
+    pub generic_args: Option<Vec<Type>>,
     pub span: Span,
 }
 
@@ -57,38 +57,37 @@ pub struct PathSegment {
 #[derive(Debug, Clone)]
 pub struct Path {
     pub id: NodeId,
-    pub segments: Vec<PathSegment>, // <--- 修改：Identifier -> PathSegment
+    pub segments: Vec<PathSegment>,
     pub span: Span,
 }
 
 /// 变量/参数的可变性修饰符
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mutability {
-    Constant,  // const / ^
-    Mutable,   // mut / *
-    Immutable, // (default for set)
+    Constant,
+    Mutable,
+    Immutable,
 }
 
 /// 二元运算符
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOperator {
-    // 逻辑
     LogicalOr,
     LogicalAnd,
-    // 比较
+
     Equal,
     NotEqual,
     Less,
     LessEqual,
     Greater,
     GreaterEqual,
-    // 算术
+
     Add,
     Subtract,
     Multiply,
     Divide,
     Modulo,
-    // 位运算 (band, bor, xor)
+
     BitwiseAnd,
     BitwiseOr,
     BitwiseXor,
@@ -99,11 +98,11 @@ pub enum BinaryOperator {
 /// 一元运算符
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOperator {
-    Negate, // -
-    Not,    // !
-    // 虽然语法上是后缀，但在 AST 中把它们归一化为一元运算通常更方便
-    Dereference, // ^ (后缀)
-    AddressOf,   // & (后缀)
+    Negate,
+    Not,
+
+    Dereference,
+    AddressOf,
 }
 
 /// ======================================================
@@ -134,15 +133,12 @@ pub enum TypeKind {
     },
 
     /// 数组类型 T[N] - EBNF: AtomType "[" INT "]"
-    Array {
-        inner: Box<Type>,
-        size: u64, // 编译时必须知晓大小
-    },
+    Array { inner: Box<Type>, size: u64 },
 
     /// 函数指针类型 fn(i32, i32) -> bool
     Function {
         params: Vec<Type>,
-        ret_type: Option<Box<Type>>, // None implies Void/Unit
+        ret_type: Option<Box<Type>>,
     },
 }
 
@@ -161,7 +157,7 @@ pub enum PrimitiveType {
     F32,
     F64,
     Bool,
-    // 内部用于分析和与llvm交互用的占位类型
+
     Unit,
 }
 
@@ -242,11 +238,10 @@ pub enum ExpressionKind {
     /// 静态/命名空间访问: expr::member
     /// 对应 EBNF: Postfix -> "::" Identifier
     StaticAccess {
-        target: Box<Expression>, // 这里的 target 可能是个 Path，也可能是个复杂表达式
+        target: Box<Expression>,
         member: Identifier,
     },
 
-    // 内置函数 @sizeof(T)
     SizeOf(Type),
     AlignOf(Type),
 }
@@ -260,7 +255,7 @@ pub struct StructFieldInit {
 
 #[derive(Debug, Clone)]
 pub enum Literal {
-    Integer(u64), // 可以后续细化为存 String 以支持大数
+    Integer(u64),
     Float(f64),
     String(String),
     Char(char),
@@ -283,7 +278,7 @@ pub enum StatementKind {
     /// 变量声明
     /// EBNF: DeclStmt -> VarModifier Identifier ":" Type [ "=" Expression ] ";"
     VariableDeclaration {
-        modifier: Mutability, // set(mut?), mut, const
+        modifier: Mutability,
         name: Identifier,
         type_annotation: Type,
         initializer: Option<Expression>,
@@ -292,7 +287,7 @@ pub enum StatementKind {
     /// 赋值
     /// EBNF: AssignStmt -> Postfix "=" Expression ";"
     Assignment {
-        lhs: Expression, // 这里在语义分析阶段要检查是否为 LValue
+        lhs: Expression,
         rhs: Expression,
     },
 
@@ -305,15 +300,15 @@ pub enum StatementKind {
     /// If 语句
     If {
         condition: Expression,
-        then_block: Block,                   // Block 本质是 Vec<Stmt>
-        else_branch: Option<Box<Statement>>, // 可能是 Block 或 If (else if)
+        then_block: Block,
+        else_branch: Option<Box<Statement>>,
     },
 
     /// While 语句
     /// EBNF: "while" "(" Expression ")" [ ":" DeclStmt ] Block
     While {
         condition: Expression,
-        init_statement: Option<Box<Statement>>, // 那个奇怪的 [ ":" DeclStmt ]
+        init_statement: Option<Box<Statement>>,
         body: Block,
     },
 
@@ -321,7 +316,7 @@ pub enum StatementKind {
     Switch {
         target: Expression,
         cases: Vec<SwitchCase>,
-        default_case: Option<Block>, // default -> Statement
+        default_case: Option<Block>,
     },
 
     /// 流程控制
@@ -342,7 +337,7 @@ pub struct SwitchCase {
 pub struct Block {
     pub id: NodeId,
     pub stmts: Vec<Statement>,
-    pub span: Span, // <--- 这里存 { } 的位置
+    pub span: Span,
 }
 
 /// ======================================================
@@ -383,7 +378,7 @@ pub enum ItemKind {
     StructDecl(StructDefinition),
 
     /// 联合体
-    UnionDecl(StructDefinition), // 结构类似 Struct
+    UnionDecl(StructDefinition),
 
     /// 枚举定义
     EnumDecl(EnumDefinition),
@@ -417,8 +412,6 @@ pub enum ItemKind {
         methods: Vec<FunctionDefinition>,
     },
 
-    // 全局变量定义
-    // covering: mut x: T = val; / set x: T = val;
     GlobalVariable(GlobalDefinition),
 }
 
@@ -426,7 +419,7 @@ pub enum ItemKind {
 pub struct GlobalDefinition {
     pub name: Identifier,
     pub ty: Type,
-    pub modifier: Mutability, // Mutable, Immutable(Set), Constant
+    pub modifier: Mutability,
     pub initializer: Option<Expression>,
     pub span: Span,
     pub is_extern: bool,
@@ -492,9 +485,7 @@ pub struct FunctionDefinition {
     pub generics: Vec<GenericParam>,
     pub params: Vec<Parameter>,
     pub return_type: Option<Type>,
-    // 修改 1: 允许没有函数体 (Option)
-    // Some(block) -> 定义
-    // None        -> 声明 (extern)
+
     pub body: Option<Block>,
     pub is_variadic: bool,
     pub is_pub: bool,
@@ -505,8 +496,8 @@ pub struct FunctionDefinition {
 #[derive(Debug, Clone)]
 pub struct Parameter {
     pub id: NodeId,
-    pub name: Identifier, // 如果是 self，这里可以是特殊的标识
-    pub ty: Type,         // 如果是 self，这里可能是 SelfType
+    pub name: Identifier,
+    pub ty: Type,
     pub is_mutable: bool,
-    pub is_self: bool, // 标记是否是 self 参数
+    pub is_self: bool,
 }

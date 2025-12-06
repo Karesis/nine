@@ -1,3 +1,17 @@
+//    Copyright 2025 Karesis
+//
+//    Licensed under the Apache License, Version 2.0 (the "License");
+//    you may not use this file except in compliance with the License.
+//    You may obtain a copy of the License at
+//
+//        http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing, software
+//    distributed under the License is distributed on an "AS IS" BASIS,
+//    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//    See the License for the specific language governing permissions and
+//    limitations under the License.
+
 use target_lexicon::{PointerWidth, Triple};
 
 #[derive(Debug, Clone)]
@@ -5,16 +19,13 @@ pub struct TargetMetrics {
     pub triple: Triple,
     pub ptr_byte_width: u64,
     pub ptr_align: u64,
-    // 未来可以加 endianness, simd_width 等
 }
 
 impl TargetMetrics {
-    // 从 host (当前运行电脑) 获取默认配置
     pub fn host() -> Self {
         Self::from_triple(Triple::host())
     }
 
-    // 从字符串解析 (e.g. "wasm32-unknown-unknown")
     pub fn from_str(s: &str) -> Result<Self, String> {
         let triple: Triple = s
             .parse()
@@ -23,18 +34,17 @@ impl TargetMetrics {
     }
 
     fn from_triple(triple: Triple) -> Self {
-        // 根据架构判断指针宽度
         let width = match triple.pointer_width() {
             Ok(PointerWidth::U16) => 2,
             Ok(PointerWidth::U32) => 4,
             Ok(PointerWidth::U64) => 8,
-            Err(_) => 8, // 默认回退到 64 位
+            Err(_) => 8,
         };
 
         Self {
             triple,
             ptr_byte_width: width,
-            ptr_align: width, // 通常指针的对齐要求等于其宽度
+            ptr_align: width,
         }
     }
 

@@ -46,17 +46,13 @@ impl<'a> Lexer<'a> {
         };
 
         match c {
-            // 1. 标识符与关键字 (Start with a-z, A-Z, _)
             c if is_ident_start(c) => self.scan_identifier(),
 
-            // 2. 数字 (Start with 0-9)
             c if c.is_ascii_digit() => self.scan_number(),
 
-            // 3. 字符串与字符
             '"' => self.scan_string(),
             '\'' => self.scan_char(),
 
-            // 4. 单字符与双字符符号
             '(' => self.make_token(TokenKind::LParen),
             ')' => self.make_token(TokenKind::RParen),
             '{' => self.make_token(TokenKind::LBrace),
@@ -69,26 +65,22 @@ impl<'a> Lexer<'a> {
             '*' => self.make_token(TokenKind::Star),
             '/' => self.make_token(TokenKind::Slash),
             '%' => self.make_token(TokenKind::Percent),
-            '^' => self.make_token(TokenKind::Caret), // Ptr / Deref
-            '&' => self.make_token(TokenKind::Ampersand), // AddrOf
-            '|' => self.make_token(TokenKind::Pipe),  // Switch pattern
+            '^' => self.make_token(TokenKind::Caret),
+            '&' => self.make_token(TokenKind::Ampersand),
+            '|' => self.make_token(TokenKind::Pipe),
             '@' => self.make_token(TokenKind::At),
             '#' => self.make_token(TokenKind::Hash),
 
-            // 需要向前看的符号
             '.' => {
-                // 检查是否是 '...'
                 let mut lookahead = self.chars.clone();
                 let next1 = lookahead.next();
                 let next2 = lookahead.next();
 
                 if let (Some('.'), Some('.')) = (next1, next2) {
-                    // 确实是 '...'，吞噬掉后两个点
-                    self.advance(); // second dot
-                    self.advance(); // third dot
+                    self.advance();
+                    self.advance();
                     self.make_token(TokenKind::DotDotDot)
                 } else {
-                    // 只是单个点 '.'
                     self.make_token(TokenKind::Dot)
                 }
             }
@@ -119,7 +111,7 @@ impl<'a> Lexer<'a> {
 
             '<' => {
                 if self.match_char('<') {
-                    self.make_token(TokenKind::Shl) // <<
+                    self.make_token(TokenKind::Shl)
                 } else if self.match_char('=') {
                     self.make_token(TokenKind::LtEq)
                 } else {
@@ -129,7 +121,7 @@ impl<'a> Lexer<'a> {
 
             '>' => {
                 if self.match_char('>') {
-                    self.make_token(TokenKind::Shr) // >>
+                    self.make_token(TokenKind::Shr)
                 } else if self.match_char('=') {
                     self.make_token(TokenKind::GtEq)
                 } else {
@@ -145,12 +137,9 @@ impl<'a> Lexer<'a> {
                 }
             }
 
-            // 未知字符
             _ => self.make_token(TokenKind::ERROR),
         }
     }
-
-    // === 具体的扫描函数 ===
 
     fn scan_identifier(&mut self) -> Token {
         while let Some(&c) = self.chars.peek() {
@@ -161,26 +150,22 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        // 提取文本
         let text = &self.src[self.start_pos..self.current_pos];
 
-        // 检查是否是关键字
         let kind = TokenKind::lookup_keyword(text).unwrap_or(TokenKind::Identifier);
 
         self.make_token(kind)
     }
 
     fn scan_number(&mut self) -> Token {
-        // 1. 检查起始字符是否为 '0'
         let start_char = self.src.as_bytes()[self.start_pos] as char;
 
         if start_char == '0' {
-            // 此时 self.chars.peek() 指向的是 '0' 后面的那个字符 (例如 'x')
             if let Some(&c) = self.chars.peek() {
                 match c {
                     'x' | 'X' => {
-                        self.advance(); // 消耗 x
-                        // 扫描 Hex 数字 (0-9, a-f, A-F, _)
+                        self.advance();
+
                         while let Some(&c) = self.chars.peek() {
                             if c.is_ascii_hexdigit() || c == '_' {
                                 self.advance();
@@ -191,8 +176,8 @@ impl<'a> Lexer<'a> {
                         return self.make_token(TokenKind::Integer);
                     }
                     'b' | 'B' => {
-                        self.advance(); // 消耗 b
-                        // 扫描 Bin 数字 (0-1, _)
+                        self.advance();
+
                         while let Some(&c) = self.chars.peek() {
                             if c == '0' || c == '1' || c == '_' {
                                 self.advance();
@@ -203,8 +188,8 @@ impl<'a> Lexer<'a> {
                         return self.make_token(TokenKind::Integer);
                     }
                     'o' | 'O' => {
-                        self.advance(); // 消耗 o
-                        // 扫描 Oct 数字 (0-7, _)
+                        self.advance();
+
                         while let Some(&c) = self.chars.peek() {
                             if (c >= '0' && c <= '7') || c == '_' {
                                 self.advance();
@@ -214,14 +199,11 @@ impl<'a> Lexer<'a> {
                         }
                         return self.make_token(TokenKind::Integer);
                     }
-                    _ => {} // 后面不是 x/b/o，是普通的 0 或者 0.123
+                    _ => {}
                 }
             }
         }
 
-        // 2. 普通十进制扫描
-        // 如果是 0xB8...，上面的分支会返回，不会走到这里
-        // 如果是 123，会走到这里
         while let Some(&c) = self.chars.peek() {
             if c.is_ascii_digit() || c == '_' {
                 self.advance();
@@ -230,13 +212,12 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        // 3. 扫描小数部分
         if let Some(&'.') = self.chars.peek() {
             let mut iter_clone = self.chars.clone();
             iter_clone.next();
             if let Some(next_c) = iter_clone.next() {
                 if next_c.is_ascii_digit() {
-                    self.advance(); // .
+                    self.advance();
                     while let Some(&c) = self.chars.peek() {
                         if c.is_ascii_digit() || c == '_' {
                             self.advance();
@@ -253,15 +234,13 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_string(&mut self) -> crate::token::Token {
-        // 已消耗了开头的 "
         while let Some(&c) = self.chars.peek() {
             match c {
                 '"' => {
-                    self.advance(); // 闭合引号
+                    self.advance();
                     return self.make_token(TokenKind::StringLit);
                 }
                 '\\' => {
-                    // 转义：吞掉 \ 和下一个字符
                     self.advance();
                     self.advance();
                 }
@@ -270,17 +249,15 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        // 如果循环结束还没遇到 "，说明 EOF 了，报错
+
         self.make_token(TokenKind::ERROR)
     }
 
     fn scan_char(&mut self) -> crate::token::Token {
-        // 已消耗了开头的 '
-        // 简单处理：'a', '\n', '\t'
         if let Some(&c) = self.chars.peek() {
             if c == '\\' {
-                self.advance(); // \
-                self.advance(); // n, t, etc.
+                self.advance();
+                self.advance();
             } else {
                 self.advance();
             }
@@ -292,8 +269,6 @@ impl<'a> Lexer<'a> {
             self.make_token(TokenKind::ERROR)
         }
     }
-
-    // === 辅助函数 ===
 
     fn advance(&mut self) -> Option<char> {
         let c = self.chars.next()?;
@@ -319,13 +294,11 @@ impl<'a> Lexer<'a> {
                     self.advance();
                 }
                 '/' => {
-                    // 预读一位，看是不是 //
                     let mut lookahead = self.chars.clone();
                     lookahead.next();
                     if let Some('/') = lookahead.next() {
-                        // 是注释，吞掉当前行
-                        self.advance(); // /
-                        self.advance(); // /
+                        self.advance();
+                        self.advance();
                         while let Some(&c) = self.chars.peek() {
                             if c == '\n' {
                                 break;
@@ -333,7 +306,6 @@ impl<'a> Lexer<'a> {
                             self.advance();
                         }
                     } else {
-                        // 只是一个除号 /，不是空白，停止跳过
                         break;
                     }
                 }

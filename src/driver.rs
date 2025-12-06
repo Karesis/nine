@@ -43,10 +43,8 @@ impl Driver {
             .load_file(&abs_entry)
             .map_err(|e| format!("Cannot load root file: {}", e))?;
 
-        // 每次编译前清空错误
         self.parse_errors.clear();
 
-        // 根文件的 is_root = true
         self.parse_module(root_id, true)
     }
 
@@ -57,17 +55,14 @@ impl Driver {
         let base_offset = file.start_pos;
         let current_file_path = file.path.clone();
 
-        // 2. Parse
         let lexer = Lexer::new(&src);
         let mut parser = Parser::new(&src, lexer, base_offset, &mut self.global_node_id);
         let mut program = parser.parse_program();
 
         if !parser.errors.is_empty() {
-            // 将 parser 里的错误转移到 driver 里
             self.parse_errors.extend(parser.errors);
         }
 
-        // === 3. 计算子模块查找路径 (保持原逻辑) ===
         let parent_dir = current_file_path.parent().unwrap();
         let file_stem = current_file_path.file_stem().unwrap().to_str().unwrap();
 
@@ -79,7 +74,6 @@ impl Driver {
             parent_dir.join(file_stem)
         };
 
-        // 4. 遍历 AST，加载 ModuleDecl
         for item in &mut program.items {
             if let ItemKind::ModuleDecl { name, items, .. } = &mut item.kind {
                 if items.is_some() {
@@ -88,7 +82,6 @@ impl Driver {
 
                 let mod_name = &name.name;
 
-                // 查找策略
                 let path_sibling = search_dir.join(format!("{}.9", mod_name));
                 let path_entry = search_dir.join(mod_name).join("entry.9");
 
@@ -108,7 +101,6 @@ impl Driver {
                     .load_file(&target_path)
                     .map_err(|e| format!("Failed to load module {}: {}", mod_name, e))?;
 
-                // 递归
                 let sub_program = self.parse_module(sub_id, false)?;
                 *items = Some(sub_program.items);
             }
