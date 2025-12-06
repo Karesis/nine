@@ -32,12 +32,12 @@ fn print_help() {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    
+
     // 默认配置
     let mut source_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
     // 默认改为 Executable，因为这是大多数用户想要的
-    let mut emit_type = EmitType::Executable; 
+    let mut emit_type = EmitType::Executable;
     let mut verbose = false;
     let mut target_str: Option<String> = None;
 

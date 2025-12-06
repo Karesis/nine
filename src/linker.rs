@@ -1,7 +1,7 @@
 // linker.rs
+use crate::target::TargetMetrics;
 use std::path::Path;
 use std::process::Command;
-use crate::target::TargetMetrics;
 
 /// 检查 clang 是否存在
 fn check_clang_installed() -> bool {
@@ -40,25 +40,25 @@ pub fn link_executable(
     }
 
     let mut cmd = Command::new(linker_cmd);
-    
-    cmd.arg(obj_path)
-       .arg("-o")
-       .arg(output_path);
+
+    cmd.arg(obj_path).arg("-o").arg(output_path);
 
     cmd.arg("--target").arg(&target_triple);
 
     //? LTO (Link Time Optimization)
     //? -flto -O3
-    //? cmd.arg("-O2"); 
-    
+    //? cmd.arg("-O2");
+
     //? linking to lib
-    //? cmd.arg("-lm"); 
+    //? cmd.arg("-lm");
 
     if verbose {
         println!("[Linker] Executing: {:?}", cmd);
     }
 
-    let output = cmd.output().map_err(|e| format!("Failed to run linker: {}", e))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to run linker: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

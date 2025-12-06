@@ -18,27 +18,27 @@ pub mod codegen;
 pub mod diagnostic;
 pub mod driver;
 pub mod lexer;
+pub mod linker;
 pub mod parser;
 pub mod source;
 pub mod target;
 pub mod token;
-pub mod linker; 
 
 use crate::analyzer::Analyzer;
 use crate::codegen::CodeGen;
 use crate::diagnostic::emit_diagnostics;
 use crate::driver::Driver;
-use crate::linker::link_executable; 
+use crate::linker::link_executable;
 use crate::target::TargetMetrics;
+use inkwell::OptimizationLevel;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
 };
-use inkwell::OptimizationLevel;
 use std::error::Error;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::fs; 
 
 #[derive(Debug, Clone)]
 pub enum EmitType {
@@ -101,14 +101,20 @@ fn handle_output(module: &Module, config: &CompileConfig) -> Result<(), Box<dyn 
         None => {
             let mut p = config.source_path.clone();
             match config.emit_type {
-                EmitType::LlvmIr => { p.set_extension("ll"); },
-                EmitType::Bitcode => { p.set_extension("bc"); },
-                EmitType::Object => { p.set_extension("o"); },
+                EmitType::LlvmIr => {
+                    p.set_extension("ll");
+                }
+                EmitType::Bitcode => {
+                    p.set_extension("bc");
+                }
+                EmitType::Object => {
+                    p.set_extension("o");
+                }
                 EmitType::Executable => {
                     if cfg!(target_os = "windows") {
                         p.set_extension("exe");
                     } else {
-                        p.set_extension(""); 
+                        p.set_extension("");
                     }
                 }
             }
@@ -141,7 +147,9 @@ fn handle_output(module: &Module, config: &CompileConfig) -> Result<(), Box<dyn 
 
             emit_object_file(module, &temp_obj_path, &config.target)?;
 
-            if let Err(e) = link_executable(&temp_obj_path, &output_path, &config.target, config.verbose) {
+            if let Err(e) =
+                link_executable(&temp_obj_path, &output_path, &config.target, config.verbose)
+            {
                 // 如果链接失败，保留 .o 文件可能有助于调试，但通常应该报错
                 return Err(format!("Linking failed: {}", e).into());
             }
@@ -166,7 +174,7 @@ fn emit_object_file(
     module.set_triple(&triple);
 
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
-    
+
     let target_machine = target
         .create_target_machine(
             &triple,
