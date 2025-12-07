@@ -1885,7 +1885,13 @@ impl<'a> Parser<'a> {
                 self.peek().span.start
             };
 
-            methods.push(self.parse_function_definition(is_method_pub, false, true, fn_start, None)?);
+            methods.push(self.parse_function_definition(
+                is_method_pub,
+                false,
+                true,
+                fn_start,
+                None,
+            )?);
         }
 
         let end = self.expect(TokenKind::RBrace)?.span.end;
@@ -1906,7 +1912,7 @@ impl<'a> Parser<'a> {
     // TypeImpDecl -> "imp" [Generics] [ Path ] "for" Type "{" { MethodDecl } "}"
     fn parse_imp_decl(&mut self, start: usize) -> ParseResult<Item> {
         self.expect(TokenKind::Imp)?;
-        
+
         // 1. 解析 imp 自身的泛型参数 (imp#<T>)
         let generics = self.parse_generic_params()?;
 
@@ -1931,8 +1937,12 @@ impl<'a> Parser<'a> {
         let mut methods = Vec::new();
         while !self.check(TokenKind::RBrace) && !self.is_at_end() {
             let is_pub = self.match_token(&[TokenKind::Pub]);
-            let fn_start = if is_pub { self.previous_span().start } else { self.peek().span.start };
-            
+            let fn_start = if is_pub {
+                self.previous_span().start
+            } else {
+                self.peek().span.start
+            };
+
             // 解析方法 (允许 self)
             methods.push(self.parse_function_definition(
                 is_pub,
@@ -2053,9 +2063,9 @@ impl<'a> Parser<'a> {
     /// allow_self: 是否允许 'self' 参数 (imp 方法和 cap 定义允许，普通函数和静态方法不允许)
     /// ctx_type: self 的具体类型 (imp 中有，cap 中为 None)
     fn parse_param_list(
-        &mut self, 
-        allow_self: bool, 
-        ctx_type: Option<&Type>
+        &mut self,
+        allow_self: bool,
+        ctx_type: Option<&Type>,
     ) -> ParseResult<(Vec<Parameter>, bool)> {
         let mut params = Vec::new();
         let mut is_variadic = false;
@@ -2085,7 +2095,7 @@ impl<'a> Parser<'a> {
                         message: "self only allowed in imp or cap".into(),
                     });
                 }
-                
+
                 if !params.is_empty() {
                     return Err(ParseError {
                         expected: "Parameter".into(),
@@ -2096,8 +2106,11 @@ impl<'a> Parser<'a> {
                 }
 
                 let mut modifier = Mutability::Immutable;
-                if self.match_token(&[TokenKind::Mut]) { modifier = Mutability::Mutable; }
-                else if self.match_token(&[TokenKind::Const]) { modifier = Mutability::Constant; }
+                if self.match_token(&[TokenKind::Mut]) {
+                    modifier = Mutability::Mutable;
+                } else if self.match_token(&[TokenKind::Const]) {
+                    modifier = Mutability::Constant;
+                }
 
                 let self_tok = self.expect(TokenKind::SelfVal)?;
 
@@ -2116,17 +2129,20 @@ impl<'a> Parser<'a> {
                             segments: vec![PathSegment {
                                 name: "Self".to_string(),
                                 generic_args: None,
-                                span: self_tok.span
+                                span: self_tok.span,
                             }],
-                            span: self_tok.span
+                            span: self_tok.span,
                         }),
-                        span: self_tok.span
+                        span: self_tok.span,
                     }
                 };
 
                 params.push(Parameter {
                     id: self.next_id(),
-                    name: Identifier { name: "self".into(), span: self_tok.span },
+                    name: Identifier {
+                        name: "self".into(),
+                        span: self_tok.span,
+                    },
                     ty: real_type,
                     is_mutable: modifier == Mutability::Mutable,
                     is_self: true,
@@ -2134,8 +2150,11 @@ impl<'a> Parser<'a> {
             } else {
                 // 普通参数解析 (保持不变)
                 let mut modifier = Mutability::Immutable;
-                if self.match_token(&[TokenKind::Mut]) { modifier = Mutability::Mutable; } 
-                else if self.match_token(&[TokenKind::Const]) { modifier = Mutability::Constant; }
+                if self.match_token(&[TokenKind::Mut]) {
+                    modifier = Mutability::Mutable;
+                } else if self.match_token(&[TokenKind::Const]) {
+                    modifier = Mutability::Constant;
+                }
 
                 let p_name = self.parse_identifier()?;
                 self.expect(TokenKind::Colon)?;
@@ -2150,7 +2169,9 @@ impl<'a> Parser<'a> {
                 });
             }
 
-            if !self.match_token(&[TokenKind::Comma]) { break; }
+            if !self.match_token(&[TokenKind::Comma]) {
+                break;
+            }
         }
 
         Ok((params, is_variadic))

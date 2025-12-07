@@ -23,9 +23,9 @@ use inkwell::values::{
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use std::collections::HashMap;
 
+use crate::analyzer::DefKind;
 use crate::analyzer::{AnalysisContext, DefId, MethodInfo, TypeKey};
 use crate::ast::*;
-use crate::analyzer::DefKind;
 
 macro_rules! trace {
     ($($arg:tt)*) => {
@@ -126,23 +126,35 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
             TypeKey::Instantiated { def_id, .. } => {
                 // 1. 查 Analyzer 获取定义种类
-                let kind = self.analysis.def_kind.get(def_id).cloned().unwrap_or(DefKind::Struct);
+                let kind = self
+                    .analysis
+                    .def_kind
+                    .get(def_id)
+                    .cloned()
+                    .unwrap_or(DefKind::Struct);
 
                 match kind {
                     // Case A: Enum 是整数
                     DefKind::Enum => {
-                        let underlying = self.analysis.enum_underlying_types.get(def_id)
-                            .cloned().unwrap_or(PrimitiveType::I32);
+                        let underlying = self
+                            .analysis
+                            .enum_underlying_types
+                            .get(def_id)
+                            .cloned()
+                            .unwrap_or(PrimitiveType::I32);
                         Some(self.compile_primitive_type(&underlying))
                     }
-                    
+
                     // Case B: Struct 和 Union 都是 LLVM Struct
                     DefKind::Struct | DefKind::Union => {
                         let mangled_name = self.analysis.get_mangling_type_name(key);
                         if let Some(st) = self.struct_types.get(&mangled_name) {
                             Some(st.as_basic_type_enum())
                         } else {
-                            panic!("ICE: Struct/Union type '{}' not pre-generated.", mangled_name);
+                            panic!(
+                                "ICE: Struct/Union type '{}' not pre-generated.",
+                                mangled_name
+                            );
                         }
                     }
 
@@ -152,18 +164,30 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                         eprintln!("[ICE DEBUG] 💥 Caught Cap type in Codegen!");
                         eprintln!("[ICE DEBUG] DefId: {:?}", def_id);
                         if let Some(func) = self.current_fn {
-                             eprintln!("[ICE DEBUG] Current compiling function (LLVM): {:?}", func.get_name());
+                            eprintln!(
+                                "[ICE DEBUG] Current compiling function (LLVM): {:?}",
+                                func.get_name()
+                            );
                         }
                         if let Some((def_id, args)) = &self.generic_context {
-                             eprintln!("[ICE DEBUG] Current Generic Context: DefId {:?}, Args: {:?}", def_id, args);
+                            eprintln!(
+                                "[ICE DEBUG] Current Generic Context: DefId {:?}, Args: {:?}",
+                                def_id, args
+                            );
                         }
-                        
-                        panic!("ICE: Capability type (DefId {:?}) reached Codegen...", def_id);
+
+                        panic!(
+                            "ICE: Capability type (DefId {:?}) reached Codegen...",
+                            def_id
+                        );
                     }
 
-                    // Case D: Enum Variant 不应该作为类型出现 
+                    // Case D: Enum Variant 不应该作为类型出现
                     DefKind::EnumVariant => {
-                        panic!("ICE: EnumVariant (DefId {:?}) treated as a Type in Codegen. Variants are values, their type is the parent Enum.", def_id);
+                        panic!(
+                            "ICE: EnumVariant (DefId {:?}) treated as a Type in Codegen. Variants are values, their type is the parent Enum.",
+                            def_id
+                        );
                     }
                 }
             }
@@ -275,11 +299,16 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
     fn declare_concrete_structs(&mut self) {
         for key in &self.analysis.concrete_structs {
             if let TypeKey::Instantiated { def_id, .. } = key {
-                let kind = self.analysis.def_kind.get(def_id).cloned().unwrap_or(DefKind::Struct);
-                
+                let kind = self
+                    .analysis
+                    .def_kind
+                    .get(def_id)
+                    .cloned()
+                    .unwrap_or(DefKind::Struct);
+
                 if matches!(kind, DefKind::Struct | DefKind::Union) {
                     let mangled_name = self.analysis.get_mangling_type_name(key);
-                    
+
                     // 避免重复创建
                     if !self.struct_types.contains_key(&mangled_name) {
                         let st = self.context.opaque_struct_type(&mangled_name);
@@ -296,27 +325,42 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
         for key in structs {
             if let TypeKey::Instantiated { def_id, args } = &key {
-                let kind = self.analysis.def_kind.get(def_id).cloned().unwrap_or(DefKind::Struct);
-                
+                let kind = self
+                    .analysis
+                    .def_kind
+                    .get(def_id)
+                    .cloned()
+                    .unwrap_or(DefKind::Struct);
+
                 // Enum 跳过
-                if kind == DefKind::Enum { continue; }
+                if kind == DefKind::Enum {
+                    continue;
+                }
 
                 let mangled_name = self.analysis.get_mangling_type_name(&key);
-                let st = *self.struct_types.get(&mangled_name).expect("Struct type missing");
+                let st = *self
+                    .struct_types
+                    .get(&mangled_name)
+                    .expect("Struct type missing");
 
                 // 检查是否已经填过 Body (防止重复)
-                if !st.is_opaque() { continue; }
+                if !st.is_opaque() {
+                    continue;
+                }
 
                 match kind {
                     // === Struct ===
                     DefKind::Struct => {
                         // 查 instantiated_structs 拿字段列表
-                        if let Some(fields) = self.analysis.instantiated_structs.get(&mangled_name) {
+                        if let Some(fields) = self.analysis.instantiated_structs.get(&mangled_name)
+                        {
                             let mut llvm_field_types = Vec::new();
                             let mut indices = HashMap::new();
 
                             for (i, (field_name, field_type_key)) in fields.iter().enumerate() {
-                                let llvm_ty = self.compile_type(field_type_key).expect("Field type compile failed");
+                                let llvm_ty = self
+                                    .compile_type(field_type_key)
+                                    .expect("Field type compile failed");
                                 llvm_field_types.push(llvm_ty);
                                 indices.insert(field_name.clone(), i as u32);
                             }
@@ -325,7 +369,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                             self.struct_field_indices.insert(mangled_name, indices);
                         }
                     }
-                    
+
                     // === Union ===
                     DefKind::Union => {
                         // Union 在 LLVM 中通常表示为一个字节数组，大小等于最大对齐后的大小
@@ -335,15 +379,16 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                             // 生成 [size x i8]
                             let byte_type = self.context.i8_type();
                             let array_type = byte_type.array_type(size as u32);
-                            
+
                             st.set_body(&[array_type.as_basic_type_enum()], false); // packed=false
-                            
+
                             // Union 不需要 field indices，因为所有字段偏移量都是 0
                             // 我们存一个空的 Map 或者根本不存
-                            self.struct_field_indices.insert(mangled_name, HashMap::new());
+                            self.struct_field_indices
+                                .insert(mangled_name, HashMap::new());
                         }
                     }
-                    
+
                     _ => {}
                 }
             }
@@ -428,8 +473,9 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         }
 
         if let Some(body) = &func_def.body {
-                self.compile_block(body).expect("Failed to compile generic function body");
-            }
+            self.compile_block(body)
+                .expect("Failed to compile generic function body");
+        }
 
         if !self.block_terminated(func_def.body.as_ref().unwrap()) {
             if func_def.return_type.is_none() {
@@ -1012,15 +1058,18 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 // === 【新增】Case 2: Enum Variant (常量) ===
                 if self.analysis.def_kind.get(&def_id) == Some(&DefKind::EnumVariant) {
                     // 1. 获取数值
-                    let val = *self.analysis.enum_variant_values.get(&def_id)
+                    let val = *self
+                        .analysis
+                        .enum_variant_values
+                        .get(&def_id)
                         .expect("Enum variant value missing");
-                    
+
                     // 2. 获取 LLVM 类型 (即 Enum 的底层类型 i32)
                     let llvm_ty = self.compile_type(&type_key).unwrap().into_int_type();
-                    
+
                     // 3. 生成常量
                     let const_val = llvm_ty.const_int(val as u64, false); // sign extend? usually false for enum values
-                    
+
                     return Ok(const_val.as_basic_value_enum());
                 }
 
@@ -1044,10 +1093,19 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 // 1. 获取类型信息
                 let type_key = self.get_resolved_type(expr.id);
                 let llvm_struct_type = self.compile_type(&type_key).unwrap().into_struct_type(); // Union 也是 StructType (实际上是 Array inside Struct)
-                
+
                 // 2. 查 DefKind
-                let def_id = if let TypeKey::Instantiated { def_id, .. } = &type_key { *def_id } else { panic!("Not a named type") };
-                let kind = self.analysis.def_kind.get(&def_id).cloned().unwrap_or(DefKind::Struct);
+                let def_id = if let TypeKey::Instantiated { def_id, .. } = &type_key {
+                    *def_id
+                } else {
+                    panic!("Not a named type")
+                };
+                let kind = self
+                    .analysis
+                    .def_kind
+                    .get(&def_id)
+                    .cloned()
+                    .unwrap_or(DefKind::Struct);
 
                 // === Case A: Union 初始化 ===
                 if kind == DefKind::Union {
@@ -1055,26 +1113,32 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     if fields.is_empty() {
                         return Ok(llvm_struct_type.get_undef().as_basic_value_enum());
                     }
-                    
+
                     // 取第一个初始化的字段
                     let field_init = &fields[0];
                     let init_val = self.compile_expr(&field_init.value)?;
 
                     // 策略：通过内存中转 (Alloca -> Store Field -> Load Union)
                     // 这是处理 Union 类型双关最稳健的方法
-                    
+
                     // 1. 在栈上分配 Union 的空间
-                    let union_ptr = self.builder.build_alloca(llvm_struct_type, "union_init_tmp").unwrap();
-                    
+                    let union_ptr = self
+                        .builder
+                        .build_alloca(llvm_struct_type, "union_init_tmp")
+                        .unwrap();
+
                     // 2. 获取该字段的类型指针 (Opaque Pointer 使得我们可以直接把 union_ptr 当作字段指针)
                     // 但我们需要确保 Store 的时候类型是对的。init_val 带着类型信息。
-                    
+
                     // 3. Store 值到指针 (相当于写入 Union 的起始位置)
                     self.builder.build_store(union_ptr, init_val).unwrap();
-                    
+
                     // 4. 把整个 Union Load 出来作为返回值
-                    let union_val = self.builder.build_load(llvm_struct_type, union_ptr, "union_loaded").unwrap();
-                    
+                    let union_val = self
+                        .builder
+                        .build_load(llvm_struct_type, union_ptr, "union_loaded")
+                        .unwrap();
+
                     return Ok(union_val);
                 }
 
@@ -1083,11 +1147,12 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 let mut struct_val = llvm_struct_type.get_undef();
 
                 for field in fields {
-                    let idx = self.get_field_index(&mangled_name, &field.field_name.name)
+                    let idx = self
+                        .get_field_index(&mangled_name, &field.field_name.name)
                         .ok_or_else(|| format!("Field '{}' not found", field.field_name.name))?;
-                    
+
                     let val = self.compile_expr(&field.value)?;
-                    
+
                     struct_val = self
                         .builder
                         .build_insert_value(struct_val, val, idx, "insert")
@@ -1146,14 +1211,22 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.get_variable_ptr(*def_id).ok_or("Var missing".into())
             }
 
-            ExpressionKind::FieldAccess { receiver, field_name } => {
+            ExpressionKind::FieldAccess {
+                receiver,
+                field_name,
+            } => {
                 // 编译 Receiver 指针
                 let ptr = self.compile_expr_ptr(receiver)?;
                 let recv_type_key = self.get_resolved_type(receiver.id);
 
                 if let TypeKey::Instantiated { def_id, .. } = &recv_type_key {
-                    let kind = self.analysis.def_kind.get(def_id).cloned().unwrap_or(DefKind::Struct);
-                    
+                    let kind = self
+                        .analysis
+                        .def_kind
+                        .get(def_id)
+                        .cloned()
+                        .unwrap_or(DefKind::Struct);
+
                     match kind {
                         // === Case A: Struct (GEP) ===
                         DefKind::Struct => {
@@ -1168,15 +1241,17 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
                         // === Case B: Union ===
                         DefKind::Union => {
-                            Ok(ptr) 
+                            Ok(ptr)
                         }
-                        
                         DefKind::Enum => Err("Cannot access field of Enum".into()),
                         DefKind::Cap => Err("Cannot access field of a Capability. Caps are behavior constraints, not data structures.".into()),
                         DefKind::EnumVariant => Err("Cannot access field of an Enum Variant".into()),
                     }
                 } else {
-                    Err(format!("Field access on non-composite type: {:?}", recv_type_key))
+                    Err(format!(
+                        "Field access on non-composite type: {:?}",
+                        recv_type_key
+                    ))
                 }
             }
 
@@ -1287,21 +1362,30 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         receiver: &Expression,
         method_name: &Identifier,
         arguments: &[Expression],
-        receiver_ty: &TypeKey
+        receiver_ty: &TypeKey,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         // 1. 查找定义信息
-        let method_info = self.find_method_info(receiver_ty, &method_name.name)
+        let method_info = self
+            .find_method_info(receiver_ty, &method_name.name)
             .ok_or("Method info missing in codegen")?;
 
         // 2. 获取泛型参数
-        let mut method_args = self.analysis.node_generic_args.get(&expr_id).cloned().unwrap_or_default();
+        let mut method_args = self
+            .analysis
+            .node_generic_args
+            .get(&expr_id)
+            .cloned()
+            .unwrap_or_default();
 
         // 【核心修复】再次检查：具体实现的方法是否真的接受泛型？
         // Analyzer 可能是基于 Cap (泛型) 填的表，但具体的 Impl 可能是非泛型的。
         // 如果具体方法不接受泛型，我们强制清空 args，避免生成错误的后缀。
-        let accepts_generics = self.analysis.def_generic_params.get(&method_info.def_id)
-             .map(|ids| !ids.is_empty())
-             .unwrap_or(false);
+        let accepts_generics = self
+            .analysis
+            .def_generic_params
+            .get(&method_info.def_id)
+            .map(|ids| !ids.is_empty())
+            .unwrap_or(false);
 
         if !accepts_generics {
             method_args.clear();
@@ -1309,18 +1393,24 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
         // 3. 重建名字
         let fn_name = if !accepts_generics {
-             // 非泛型函数：名字是固定的
-             self.analysis.mangled_names.get(&method_info.def_id)
-                 .cloned()
-                 .unwrap_or_else(|| panic!("Mangled name missing for {:?}", method_info.def_id))
+            // 非泛型函数：名字是固定的
+            self.analysis
+                .mangled_names
+                .get(&method_info.def_id)
+                .cloned()
+                .unwrap_or_else(|| panic!("Mangled name missing for {:?}", method_info.def_id))
         } else {
-             // 泛型函数：需要拼接 args
-             self.analysis.get_mangled_function_name(method_info.def_id, &method_args)
+            // 泛型函数：需要拼接 args
+            self.analysis
+                .get_mangled_function_name(method_info.def_id, &method_args)
         };
 
         // [DEBUG] 打印当前所有函数
         if !self.functions.contains_key(&fn_name) {
-            eprintln!("[Codegen DEBUG] Cannot find function '{}'. Available functions:", fn_name);
+            eprintln!(
+                "[Codegen DEBUG] Cannot find function '{}'. Available functions:",
+                fn_name
+            );
             for k in self.functions.keys() {
                 eprintln!("  - {}", k);
             }
@@ -2116,22 +2206,30 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
 
             (TypeKey::Instantiated { def_id, .. }, TypeKey::Primitive(tgt_p)) => {
                 // 1. 获取定义种类 (默认为 Struct 防止 Panic)
-                let kind = self.analysis.def_kind.get(def_id).cloned().unwrap_or(DefKind::Struct);
-                
+                let kind = self
+                    .analysis
+                    .def_kind
+                    .get(def_id)
+                    .cloned()
+                    .unwrap_or(DefKind::Struct);
+
                 // 2. 检查是否是 Enum -> Integer
                 if kind == DefKind::Enum && self.is_integer_kind(tgt_p) {
                     let int_val = src_val.into_int_value();
-                    
+
                     // 【修正点2】使用 target_llvm_ty (函数开头的变量)
                     let dest_type = target_llvm_ty.into_int_type();
 
-                    Ok(self.builder.build_int_cast(
-                        int_val, 
-                        dest_type, 
-                        "enum_cast"
-                    ).unwrap().into())
+                    Ok(self
+                        .builder
+                        .build_int_cast(int_val, dest_type, "enum_cast")
+                        .unwrap()
+                        .into())
                 } else {
-                    Err(format!("Unsupported cast from {:?} to {:?}", src_key, target_key))
+                    Err(format!(
+                        "Unsupported cast from {:?} to {:?}",
+                        src_key, target_key
+                    ))
                 }
             }
 
