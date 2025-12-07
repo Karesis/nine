@@ -1,0 +1,31 @@
+extern fn printf(fmt: ^u8, ...) -> i32;
+
+// 1. 定义 Cap
+cap Printable {
+    fn print(self);
+}
+
+// 2. 定义泛型 Struct
+struct Box#<T> {
+    inner: T;
+}
+
+// 3. 泛型 Impl：只有当 T 是 Printable 时，Box<T> 才是 Printable
+// (Conditional Implementation)
+imp#<T: Printable> Printable for Box#<T> { 
+    fn print(self) {
+        printf("Box(");
+        self.inner.print(); // <--- 这里的 T.print() 能调通吗？
+        printf(")\n");
+    }
+}
+
+imp Printable for i32 {
+    fn print(self) { printf("%d", self); }
+}
+
+fn main() -> i32 {
+    set b: Box#<i32> = Box#<i32> { inner: 42 };
+    b.print(); // 应该输出 Box(42)
+    ret 0;
+}

@@ -1,0 +1,37 @@
+extern fn printf(fmt: ^u8, ...) -> i32;
+
+// 联合体：8字节整数 vs 8个字节数组
+union Converter {
+    val: i64;
+    bytes: u8[8];
+}
+
+fn main() -> i32 {
+    printf("--- Union Test ---\n");
+
+    // 初始化
+    set c: Converter = Converter { val: 0 };
+    
+    // 写入整数部分
+    // 0x4142434445464748 (16进制) 对应 ASCII: ABCDEFGH
+    // x86 是小端序 (Little Endian)，所以在内存里应该是反过来的
+    c.val = 0x4142434445464748; 
+
+    printf("Original i64: %lx\n", c.val);
+
+    // 通过数组部分读取 (验证内存重叠)
+    printf("Bytes: ");
+    
+    // 打印前4个字节
+    // 如果是小端序，最低位字节 (0x48 'H') 在最前面
+    printf("[%x] ", c.bytes[0] as i32); 
+    printf("[%x] ", c.bytes[1] as i32);
+    printf("[%x] ", c.bytes[2] as i32);
+    printf("[%x]\n", c.bytes[3] as i32);
+
+    // 验证修改一个字段是否影响另一个
+    c.bytes[0] = 0; // 把最低位清零
+    printf("Modified i64: %lx\n", c.val); // 应该变了
+
+    ret 0;
+}

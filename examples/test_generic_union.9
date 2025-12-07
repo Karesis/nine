@@ -1,0 +1,22 @@
+// 泛型联合体
+// 如果 T 是 u8 (1字节)，Size = 8 (由 u64 决定)
+// 如果 T 是 LargeStruct (100字节)，Size = 100
+union Container#<T> {
+    item: T;
+    raw: u64;
+}
+
+struct Big { arr: u8[32]; } // 32字节
+
+fn main() -> i32 {
+    // 实例化 1: T = u8
+    // sizeof(Container<u8>) 应该是 8 (align 8)
+    set c1: Container#<u8> = Container#<u8> { raw: 0 };
+    
+    // 实例化 2: T = Big
+    // sizeof(Container<Big>) 应该是 32
+    set c2: Container#<Big> = Container#<Big> { raw: 0 };
+    // 只要不报错即可
+    
+    ret 0;
+}

@@ -1,0 +1,45 @@
+extern fn printf(fmt: ^u8, ...) -> i32;
+
+// C-style 枚举
+enum Status {
+    Ok = 0;
+    Fail = 1;
+    Unknown = 99;
+}
+
+// 泛型结构体包含枚举
+struct Response#<T> {
+    data: T;
+    status: Status;
+}
+
+// 泛型函数处理枚举
+fn check_status(s: Status) {
+    if (s == Status::Ok) {
+        printf("Status: OK\n");
+    } else {
+        printf("Status: Not OK (%d)\n", s as i32);
+    }
+}
+
+fn main() -> i32 {
+    printf("--- Enum Test ---\n");
+
+    // 1. 直接使用
+    set s1: Status = Status::Ok;
+    check_status(s1);
+
+    set s2: Status = Status::Unknown;
+    check_status(s2);
+
+    // 2. 在泛型结构体中使用
+    set resp: Response#<i32> = Response#<i32> {
+        data: 42,
+        status: Status::Fail
+    };
+
+    printf("Response: Data=%d, ", resp.data);
+    check_status(resp.status);
+
+    ret 0;
+}
