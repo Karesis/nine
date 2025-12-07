@@ -118,6 +118,8 @@ pub enum DefKind {
     Struct,
     Union,
     Enum,
+    Cap,
+    EnumVariant,
 }
 
 #[derive(Debug)]
@@ -160,6 +162,20 @@ pub struct AnalysisContext {
     // 如 enum Color : u8 { ... } -> u8
     // 如果没有显式指定，默认为 i32
     pub enum_underlying_types: HashMap<DefId, PrimitiveType>,
+
+    // 实现注册表
+    // 记录：某个具体类型 (TypeKey) 实现了 某个 Cap (DefId)
+    // Value: 该实现块的 DefId 
+    // Key: (TypeKey, Cap_DefId) -> Impl_DefId
+    pub impl_registry: HashMap<(TypeKey, DefId), DefId>,
+
+    // Key: Cap DefId -> (Method Name -> MethodInfo)
+    // 用于在泛型函数里查询 T: Cap 的方法
+    pub cap_methods: HashMap<DefId, HashMap<String, MethodInfo>>,
+
+    // 记录枚举成员对应的整数值
+    // Key: Variant DefId -> Value: i64 (为了通用，存 i64)
+    pub enum_variant_values: HashMap<DefId, i64>,
 }
 
 impl AnalysisContext {
@@ -185,6 +201,9 @@ impl AnalysisContext {
             node_generic_args: HashMap::new(),
             def_kind: HashMap::new(),
             enum_underlying_types: HashMap::new(),
+            impl_registry: HashMap::new(),
+            cap_methods: HashMap::new(),
+            enum_variant_values: HashMap::new(),
             target,
         }
     }
@@ -485,6 +504,16 @@ impl AnalysisContext {
 
                 Some(Layout::new(size, align))
             }
+
+            // === Case D: Capability ===
+            DefKind::Cap => {
+                return None; 
+            }
+
+            // === Case E: Enum Variant ===
+            DefKind::EnumVariant => {
+                return None;
+            }
         }
     }
 }
@@ -567,16 +596,45 @@ impl Analyzer {
                     }
                 }
 
+                // --- 接口 (Cap) ---
                 ItemKind::CapDecl(def) => {
-                    let vis = if def.is_pub {
-                        Visibility::Public
-                    } else {
-                        Visibility::Private
-                    };
-
+                    let vis = if def.is_pub { Visibility::Public } else { Visibility::Private };
                     self.define_symbol(def.name.name.clone(), item.id, vis, def.name.span);
 
+                    // 1. 注册类型
                     self.record_type(item.id, TypeKey::non_generic(item.id));
+                    
+                    // 2. 【这就是丢失的那一行！】必须标记它是个 Cap！
+                    self.ctx.def_kind.insert(item.id, DefKind::Cap); 
+
+                    // 3. 注册泛型参数
+                    let param_ids: Vec<DefId> = def.generics.iter().map(|g| g.id).collect();
+                    self.ctx.def_generic_params.insert(item.id, param_ids.clone());
+                    for param_id in param_ids.clone() { self.ctx.generic_param_defs.insert(param_id); }
+
+                    // 4. 注册方法 (但不加入 non_generic_functions!)
+                    let mut methods_map = HashMap::new();
+                    for method in &def.methods {
+                        methods_map.insert(
+                            method.name.name.clone(),
+                            MethodInfo {
+                                name: method.name.name.clone(),
+                                def_id: method.id,
+                                is_pub: true, 
+                                span: method.span,
+                            }
+                        );
+                        // 【核心修复】把方法 ID 也标记为 Cap！
+                        // 这样 check_standard_method_call 里的保护逻辑才能生效
+                        self.ctx.def_kind.insert(method.id, DefKind::Cap);
+                        let combined = format!("{}_{}", def.name.name, method.name.name);
+                        let mangled = self.generate_mangled_name(&combined);
+                        self.ctx.mangled_names.insert(method.id, mangled);
+                        self.ctx.def_generic_params.insert(method.id, param_ids.clone());
+                        
+                        // 注意：确实不要在这里加 non_generic_functions.insert
+                    }
+                    self.ctx.cap_methods.insert(item.id, methods_map);
                 }
 
                 ItemKind::StructDecl(def) => {
@@ -657,15 +715,41 @@ impl Analyzer {
                     for param_id in param_ids {
                         self.ctx.generic_param_defs.insert(param_id);
                     }
-
-                    self.record_type(item.id, TypeKey::non_generic(item.id));
+                    let enum_type = TypeKey::non_generic(item.id);
+                    self.record_type(item.id, enum_type.clone());
 
                     let mut enum_scope = Scope::new(ScopeKind::Module);
+                    let mut current_val = 0i64;
+                    
                     for variant in &def.variants {
+                        // 1. 【核心修复】必须注册符号到 Scope！否则 Status::Ok 无法解析
                         enum_scope
                             .symbols
                             .insert(variant.name.name.clone(), (variant.id, Visibility::Public));
+                        
+                        // 2. 标记 Kind (告诉 Codegen 这是一个 Variant)
+                        self.ctx.def_kind.insert(variant.id, DefKind::EnumVariant);
+                        
+                        // 3. 计算值 (支持 1+2 等常量表达式)
+                        let val = if let Some(explicit_expr) = &variant.value {
+                            if let Some(u64_val) = self.eval_constant_expr(explicit_expr) {
+                                u64_val as i64
+                            } else {
+                                self.error(
+                                    "Enum value must be a constant expression", 
+                                    explicit_expr.span
+                                );
+                                0 // Fallback
+                            }
+                        } else {
+                            current_val
+                        };
+                        
+                        self.ctx.enum_variant_values.insert(variant.id, val);
+                        self.record_type(variant.id, enum_type.clone());
+                        current_val = val + 1; // 自动递增
                     }
+
                     for method in &def.static_methods {
                         let m_vis = if method.is_pub {
                             Visibility::Public
@@ -673,16 +757,17 @@ impl Analyzer {
                             Visibility::Private
                         };
                         if enum_scope.symbols.contains_key(&method.name.name) {
-                            self.error(format!("Duplicate..."), method.span);
+                            self.error(format!("Duplicate method..."), method.span);
                         } else {
                             enum_scope
                                 .symbols
                                 .insert(method.name.name.clone(), (method.id, m_vis));
                         }
                     }
+                    
                     self.ctx.namespace_scopes.insert(item.id, enum_scope);
                     self.ctx.def_kind.insert(item.id, DefKind::Enum);
-                    let underlying = def.underlying_type.unwrap_or(PrimitiveType::I32); // 默认 i32
+                    let underlying = def.underlying_type.unwrap_or(PrimitiveType::I32);
                     self.ctx.enum_underlying_types.insert(item.id, underlying);
                 }
 
@@ -815,22 +900,10 @@ impl Analyzer {
     /// 例如处理: <T: Printable + Clone>
     fn enter_generic_scope(&mut self, generics: &[GenericParam]) {
         self.enter_scope(ScopeKind::Generic);
-
-        if !generics.is_empty() {
-            eprintln!(
-                "[DEBUG] Entering Generic Scope. Generics: {:?}",
-                generics.iter().map(|g| &g.name.name).collect::<Vec<_>>()
-            );
-        }
-
+        
         for param in generics {
             self.ctx.generic_param_defs.insert(param.id);
-
-            eprintln!(
-                "[DEBUG]   -> Registering Generic Param '{}' (ID: {:?})",
-                param.name.name, param.id
-            );
-
+            
             self.define_symbol(
                 param.name.name.clone(),
                 param.id,
@@ -838,26 +911,44 @@ impl Analyzer {
                 param.name.span,
             );
 
+            // === 解析约束 (T: Converter + ...) ===
             let mut constraint_keys = Vec::new();
-
+            
             for constraint_path in &param.constraints {
+                // 1. 解析约束的 DefId
                 if let Some(def_id) = self.resolve_path(constraint_path) {
-                    constraint_keys.push(TypeKey::non_generic(def_id));
+                    
+                    // 2. 【核心修复】从 AST Path 中提取泛型参数 (e.g. <f64>)
+                    let mut constraint_args = Vec::new();
+                    
+                    // 检查 Path 的最后一段是否有 generic_args
+                    if let Some(last_seg) = constraint_path.segments.last() {
+                        if let Some(ast_args) = &last_seg.generic_args {
+                            for arg_ty in ast_args {
+                                // 递归解析参数类型 (f64 -> Primitive(F64))
+                                constraint_args.push(self.resolve_ast_type(arg_ty));
+                            }
+                        }
+                    }
+
+                    // 3. 构造完整的 Instantiated TypeKey
+                    let key = TypeKey::Instantiated {
+                        def_id,
+                        args: constraint_args, // 把解析出来的 [f64] 存进去！
+                    };
+                    
+                    constraint_keys.push(key);
+                    
                 } else {
                     self.error(
-                        format!(
-                            "Unknown capability constraint: {:?}",
-                            constraint_path.segments.last().unwrap().name
-                        ),
-                        constraint_path.span,
+                        format!("Unknown capability constraint: {:?}", constraint_path.segments.last().unwrap().name),
+                        constraint_path.span
                     );
                 }
             }
 
             if !constraint_keys.is_empty() {
-                self.ctx
-                    .generic_constraints
-                    .insert(param.id, constraint_keys);
+                self.ctx.generic_constraints.insert(param.id, constraint_keys);
             }
         }
     }
@@ -908,10 +999,14 @@ impl Analyzer {
 
                 ItemKind::Implementation {
                     generics,
+                    implements,
                     target_type,
                     methods,
-                    ..
                 } => {
+                    // 1. 判断 imp 块本身是否带泛型
+                    // (放在 enter_scope 之前也没问题，因为 generics 是 AST 里的字段)
+                    let is_impl_concrete = generics.is_empty();
+
                     self.enter_generic_scope(generics);
 
                     let key = self.resolve_ast_type(target_type);
@@ -919,23 +1014,47 @@ impl Analyzer {
                         self.exit_scope();
                         continue;
                     }
+                    
+                    // 检查是否是 Trait 实现
+                    if let Some(cap_path) = implements {
+                        if let Some(cap_def_id) = self.resolve_path(cap_path) {
+                            if self.ctx.def_kind.get(&cap_def_id) == Some(&DefKind::Cap) { 
+                                self.ctx.impl_registry.insert(
+                                    (key.clone(), cap_def_id), 
+                                    item.id
+                                );
+                            } else {
+                                self.error("Expected a capability (cap) here", cap_path.span);
+                            }
+                        } else {
+                             self.error("Unknown capability", cap_path.span);
+                        }
+                    }
 
                     let type_name = self.ctx.get_mangling_type_name(&key);
-
                     let param_ids: Vec<DefId> = generics.iter().map(|g| g.id).collect();
 
+                    // --- 第一个循环：生成名字、处理泛型继承、注册待编译函数 ---
                     for method in methods {
                         let combined_name = format!("{}_{}", type_name, method.name.name);
                         let mangled = self.generate_mangled_name(&combined_name);
                         self.ctx.mangled_names.insert(method.id, mangled);
 
+                        // 继承 Impl 的泛型参数
                         if method.generics.is_empty() {
                             self.ctx
                                 .def_generic_params
                                 .insert(method.id, param_ids.clone());
                         }
+
+                        // 【核心修复】加入待编译列表
+                        // 只有当 (Impl具体) 且 (方法无泛型) 时，才需要 Codegen 直接编译
+                        if is_impl_concrete && method.generics.is_empty() {
+                            self.ctx.non_generic_functions.insert(method.id);
+                        }
                     }
 
+                    // --- 第二个循环：构建方法注册表 ---
                     let mut local_registry = self
                         .ctx
                         .method_registry
@@ -1043,6 +1162,13 @@ impl Analyzer {
 
                 ItemKind::CapDecl(def) => {
                     self.enter_generic_scope(&def.generics);
+
+                    self.define_symbol(
+                        "Self".to_string(), 
+                        item.id, 
+                        Visibility::Private, 
+                        def.name.span
+                    );
 
                     for method in &def.methods {
                         self.resolve_function_signature(method);
@@ -1906,15 +2032,25 @@ impl Analyzer {
                 target_type,
             } => {
                 let target_ty = self.resolve_ast_type(target_type);
+                
+                // 如果解析目标类型出错，直接返回 Error，避免后续误报
+                if let TypeKey::Error = target_ty {
+                    return TypeKey::Error;
+                }
 
                 let src_ty = self.check_expr(src_expr);
 
                 if !self.validate_cast(&src_ty, &target_ty) {
                     self.error(
                         format!("Invalid cast from {:?} to {:?}", src_ty, target_ty),
-                        expr.span,
+                        src_expr.span, // 注意：报错位置最好指向源表达式或整个 cast 表达式
                     );
+                    // 即使报错，通常也返回 Error，或者返回 target_ty 防止级联报错
+                    return TypeKey::Error; 
                 }
+
+                // 【关键】告诉编译器：这个 Cast 表达式的结果类型是 target_ty
+                self.record_type(expr.id, target_ty.clone());
 
                 target_ty
             }
@@ -1975,56 +2111,83 @@ impl Analyzer {
         TypeKey::Error
     }
 
-    /// 路径 1：标准方法调用检查
     fn check_standard_method_call(
         &mut self,
         expr_id: NodeId,
         receiver_type: &TypeKey,
         method_name: &Identifier,
-        arguments: &[Expression],
+        arguments: &[Expression]
     ) -> Option<TypeKey> {
-        let method_info = self.find_method_in_registry(receiver_type, &method_name.name)?;
+        // 1. 查找方法定义
+        let (method_info, context_args) = self.find_method_in_registry(receiver_type, &method_name.name)?;
 
-        let mut combined_args = Vec::new();
-        combined_args.extend(self.ctx.extract_generic_args(receiver_type));
+        // === [DEBUG 1] 检查查找结果和泛型注册情况 ===
+        eprintln!("[DEBUG] Method Check: '{}'", method_name.name);
+        eprintln!("[DEBUG]   Method DefId: {:?}", method_info.def_id);
+        eprintln!("[DEBUG]   Found Context Args: {:?}", context_args); 
+        // 关键检查：Analyzer 认为这个方法 ID 拥有哪些泛型参数？
+        eprintln!("[DEBUG]   Registered Generic Params for Method: {:?}", self.ctx.def_generic_params.get(&method_info.def_id));
 
-        if !combined_args.is_empty() {
-            self.ctx
-                .node_generic_args
-                .insert(expr_id, combined_args.clone());
-            self.try_record_instantiation_with_args(method_info.def_id, &combined_args);
+        // 2. 记录泛型参数 (给 Codegen 用)
+        if !context_args.is_empty() {
+            let accepts_generics = self.ctx.def_generic_params.get(&method_info.def_id)
+                .map(|ids| !ids.is_empty())
+                .unwrap_or(false);
+            
+            // === [DEBUG] 泛型决策 ===
+            eprintln!("[DEBUG] Method: {}, DefId: {:?}", method_name.name, method_info.def_id);
+            eprintln!("[DEBUG]   Context Args (from trait/struct): {:?}", context_args);
+            eprintln!("[DEBUG]   Registered Params: {:?}", self.ctx.def_generic_params.get(&method_info.def_id));
+            eprintln!("[DEBUG]   Accepts Generics? {}", accepts_generics);
+            
+            if accepts_generics {
+                eprintln!("[DEBUG] INSERTING generics for {}", method_name.name);
+                eprintln!("[DEBUG]   -> ACTION: Recording generic args for Codegen.");
+                self.ctx.node_generic_args.insert(expr_id, context_args.clone());
+                
+                if self.ctx.def_kind.get(&method_info.def_id) != Some(&DefKind::Cap) {
+                    self.try_record_instantiation_with_args(method_info.def_id, &context_args);
+                }
+            } else {
+                eprintln!("[DEBUG]   -> ACTION: Skipping generic args (Non-generic method).");
+                eprintln!("[DEBUG] SKIPPING generics for {} (not generic)", method_name.name);
+            }
         }
 
-        if let Some(TypeKey::Function { params, ret, .. }) =
-            self.ctx.types.get(&method_info.def_id).cloned()
-        {
+        // 3. 检查参数与返回值
+        if let Some(TypeKey::Function { params, ret, .. }) = self.ctx.types.get(&method_info.def_id).cloned() {
             let expected_args = if params.is_empty() { &[] } else { &params[1..] };
 
             if expected_args.len() != arguments.len() {
-                self.error(
-                    format!(
-                        "Method expects {} arguments, got {}",
-                        expected_args.len(),
-                        arguments.len()
-                    ),
-                    method_name.span,
-                );
+                self.error("Method arg count mismatch", method_name.span);
             }
 
             for (arg_expr, param_ty) in arguments.iter().zip(expected_args.iter()) {
                 let arg_actual = self.check_expr(arg_expr);
+                
+                let mut expected_concrete_ty = self.ctx.substitute_generics(param_ty, method_info.def_id, &context_args);
 
-                let expected_concrete_ty =
-                    self.ctx
-                        .substitute_generics(param_ty, method_info.def_id, &combined_args);
+                expected_concrete_ty = self.replace_self_type(
+                    &expected_concrete_ty, 
+                    method_info.def_id, 
+                    receiver_type
+                );
 
                 self.check_type_match(&expected_concrete_ty, &arg_actual, arg_expr.span);
                 self.coerce_literal_type(arg_expr.id, &expected_concrete_ty, &arg_actual);
             }
 
             let ret_ty = if let Some(r) = ret {
-                self.ctx
-                    .substitute_generics(&r, method_info.def_id, &combined_args)
+                // === [DEBUG 2] 检查返回值替换 ===
+                eprintln!("[DEBUG]   Original Ret Type: {:?}", r);
+
+                let mut ty = self.ctx.substitute_generics(&r, method_info.def_id, &context_args);
+                eprintln!("[DEBUG]   After Substitute: {:?}", ty);
+
+                ty = self.replace_self_type(&ty, method_info.def_id, receiver_type);
+                eprintln!("[DEBUG]   After Self Replace: {:?}", ty);
+                
+                ty
             } else {
                 TypeKey::Primitive(PrimitiveType::Unit)
             };
@@ -2089,26 +2252,74 @@ impl Analyzer {
         }
     }
 
-    /// 在方法注册表中查找方法 (支持泛型实例的模糊查找)
-    fn find_method_in_registry(
-        &self,
-        receiver_type: &TypeKey,
-        method_name: &str,
-    ) -> Option<MethodInfo> {
+    /// 在方法注册表中查找方法
+    /// 返回: (方法信息, 该方法所属 Struct/Cap 的具体泛型实参)
+   fn find_method_in_registry(&self, receiver_type: &TypeKey, method_name: &str) -> Option<(MethodInfo, Vec<TypeKey>)> {
+        // [DEBUG] 入口日志
+        eprintln!("[DEBUG] find_method_in_registry: Looking for '{}' on type {:?}", method_name, receiver_type);
+
+        // 1. 尝试精确匹配 (针对非泛型类型)
         if let Some(methods) = self.ctx.method_registry.get(receiver_type) {
             if let Some(info) = methods.get(method_name) {
-                return Some(info.clone());
+                eprintln!("[DEBUG]   -> Match Found in Exact Registry!");
+                let args = self.ctx.extract_generic_args(receiver_type);
+                return Some((info.clone(), args));
             }
         }
 
-        for (key, methods) in &self.ctx.method_registry {
-            if self.ctx.are_types_compatible(receiver_type, key) {
-                if let Some(info) = methods.get(method_name) {
-                    return Some(info.clone());
+        // 2. 尝试泛型定义模糊匹配 (Struct<T>)
+        if let TypeKey::Instantiated { def_id, .. } = receiver_type {
+            let args = self.ctx.extract_generic_args(receiver_type);
+            
+            for (key, methods) in &self.ctx.method_registry {
+                if let TypeKey::Instantiated { def_id: k_id, .. } = key {
+                    if k_id == def_id {
+                        if let Some(info) = methods.get(method_name) {
+                            eprintln!("[DEBUG]   -> Match Found in Fuzzy Registry (Struct)!");
+                            return Some((info.clone(), args));
+                        }
+                    }
                 }
             }
         }
+        
+        // 3. 【核心】尝试从泛型约束中查找 (Abstract Dispatch)
+        if let TypeKey::GenericParam(param_id) = receiver_type {
+            eprintln!("[DEBUG]   -> Checking constraints for GenericParam({:?})...", param_id);
+            
+            if let Some(constraints) = self.ctx.generic_constraints.get(param_id) {
+                eprintln!("[DEBUG]   -> Constraints found: {:?}", constraints);
+                
+                for constraint in constraints {
+                    // 约束通常是 Instantiated { def_id: CapId, args: cap_args }
+                    if let TypeKey::Instantiated { def_id: cap_id, args: cap_args } = constraint {
+                        
+                        eprintln!("[DEBUG]     -> Checking Cap {:?} with args {:?}", cap_id, cap_args);
 
+                        // 去 cap_methods 表里查
+                        if let Some(methods) = self.ctx.cap_methods.get(cap_id) {
+                            if let Some(info) = methods.get(method_name) {
+                                
+                                eprintln!("[DEBUG]     -> Match Found in Cap Methods! Returning args: {:?}", cap_args);
+                                // 【必须！】直接使用约束里的参数 (cap_args)
+                                return Some((info.clone(), cap_args.clone()));
+                                
+                            } else {
+                                eprintln!("[DEBUG]     -> Cap found, but method '{}' not in it.", method_name);
+                            }
+                        } else {
+                            eprintln!("[DEBUG]     -> Cap ID {:?} not found in cap_methods table!", cap_id);
+                        }
+                    } else {
+                         eprintln!("[DEBUG]     -> Constraint is not Instantiated?? {:?}", constraint);
+                    }
+                }
+            } else {
+                eprintln!("[DEBUG]   -> No constraints found for this param.");
+            }
+        }
+
+        eprintln!("[DEBUG]   -> No match found.");
         None
     }
 
@@ -2166,6 +2377,117 @@ impl Analyzer {
 
         if call_args.iter().all(|a| a.is_concrete()) {
             self.ctx.concrete_functions.insert((def_id, call_args));
+        }
+    }
+
+    /// 辅助函数：处理 Cap 方法签名中的 Self 替换
+    /// 将类型中的 "Self" (表现为 Cap 定义本身) 替换为 实际接收者类型
+    /// 
+    /// 参数:
+    /// - ty: 要检查/替换的原始类型 (e.g. fn(Self) -> Self)
+    /// - _method_def_id: 方法 ID (暂时用不到，但为了接口扩展性保留)
+    /// - receiver_type: 实际的调用者类型 (e.g. T, i32)
+    fn replace_self_type(&self, ty: &TypeKey, _method_def_id: DefId, receiver_type: &TypeKey) -> TypeKey {
+        match ty {
+            // === 核心逻辑 ===
+            // 检查是否遇到了 Cap 定义，如果是，说明这就是 "Self"
+            TypeKey::Instantiated { def_id, args } => {
+                // 查 def_kind 表，看这个 ID 是不是 Cap
+                if let Some(DefKind::Cap) = self.ctx.def_kind.get(def_id) {
+                    // 命中！这就是 Self 占位符。
+                    // 直接替换为实际的 receiver_type (例如 T 或 i32)
+                    return receiver_type.clone();
+                }
+                
+                // 如果不是 Cap (比如是 List<Self>)，则递归处理参数
+                let new_args = args.iter()
+                    .map(|a| self.replace_self_type(a, _method_def_id, receiver_type))
+                    .collect();
+                
+                TypeKey::Instantiated { def_id: *def_id, args: new_args }
+            }
+
+            // === 递归处理其他复合类型 ===
+            
+            // 指针: ^Self -> ^T
+            TypeKey::Pointer(inner, mutability) => {
+                let new_inner = self.replace_self_type(inner, _method_def_id, receiver_type);
+                TypeKey::Pointer(Box::new(new_inner), *mutability)
+            }
+
+            // 数组: Self[10] -> T[10]
+            TypeKey::Array(inner, size) => {
+                let new_inner = self.replace_self_type(inner, _method_def_id, receiver_type);
+                TypeKey::Array(Box::new(new_inner), *size)
+            }
+
+            // 函数: fn(Self) -> Self -> fn(T) -> T
+            TypeKey::Function { params, ret, is_variadic } => {
+                let new_params = params.iter()
+                    .map(|p| self.replace_self_type(p, _method_def_id, receiver_type))
+                    .collect();
+                
+                let new_ret = ret.as_ref()
+                    .map(|r| Box::new(self.replace_self_type(r, _method_def_id, receiver_type)));
+                
+                TypeKey::Function { 
+                    params: new_params, 
+                    ret: new_ret, 
+                    is_variadic: *is_variadic 
+                }
+            }
+
+            // === 基础类型保持不变 ===
+            // Primitive(i32), GenericParam(T) 等
+            _ => ty.clone(),
+        }
+    }
+    // 检查具体类型是否满足约束
+    fn check_constraint(&mut self, concrete_ty: &TypeKey, constraint_def_id: DefId, span: Span) {
+        // 1. 简单查表 (优化：如果具体的 impl 已经存在，直接通过)
+        // e.g. impl Printable for i32
+        if self.ctx.impl_registry.contains_key(&(concrete_ty.clone(), constraint_def_id)) {
+            return;
+        }
+
+        // 2. 候选者收集 (解决借用冲突 + 准备做歧义检查)
+        let mut candidates = Vec::new();
+
+        for ((impl_pattern_ty, impl_cap_id), impl_def_id) in &self.ctx.impl_registry {
+            // A. Cap ID 必须匹配
+            if *impl_cap_id != constraint_def_id {
+                continue;
+            }
+
+            // B. 尝试 Unify (模式匹配)
+            let mut mapping = HashMap::new();
+            if self.unify_types(concrete_ty, impl_pattern_ty, &mut mapping) {
+                // 匹配成功！记录候选者
+                candidates.push((*impl_def_id, mapping));
+            }
+        }
+
+        // --- 至此，对 self.ctx 的借用结束 ---
+
+        // 3. 严格一致性检查 (Strict Coherence)
+        if candidates.is_empty() {
+            // 没找到
+             self.error(
+                format!("Type {:?} does not satisfy capability constraint (DefId {:?})", concrete_ty, constraint_def_id),
+                span
+            );
+        } else if candidates.len() > 1 {
+            // 找到多个！歧义！
+            // 这就是解决 UB 的关键：拒绝猜测
+            self.error(
+                format!("Ambiguous implementations for {:?}: multiple impls apply.", concrete_ty),
+                span
+            );
+        } else {
+            // 4. 递归验证约束 (Verification)
+            // 找到了唯一的候选者，现在检查它的 Where Clauses 是否满足
+            let (impl_id, mapping) = &candidates[0];
+            self.verify_impl_obligations(*impl_id, mapping, span);
         }
     }
 
@@ -2506,6 +2828,7 @@ impl Analyzer {
             }
 
             self.try_record_instantiation_with_args(def_id, &res.all_generic_args);
+            self.verify_generic_args(def_id, &res.all_generic_args, path.span);
 
             if let Some(mut raw_type) = self.get_type_of_def(def_id) {
                 if let Some((struct_id, struct_args)) = res.struct_context {
@@ -2540,6 +2863,164 @@ impl Analyzer {
             if args.len() == param_ids.len() && args.iter().all(|a| a.is_concrete()) {
                 self.ctx.concrete_functions.insert((def_id, args.to_vec()));
             }
+        }
+    }
+
+    fn verify_generic_args(&mut self, def_id: DefId, args: &[TypeKey], span: Span) {
+        let param_ids = match self.ctx.def_generic_params.get(&def_id) {
+            Some(ids) => ids.clone(), 
+            None => return,
+        };
+
+        if param_ids.len() != args.len() { return; }
+
+        for (param_id, arg_ty) in param_ids.iter().zip(args.iter()) {
+            let constraints = self.ctx.generic_constraints.get(param_id).cloned();
+
+            if let Some(cons) = constraints {
+                for constraint_ty_key in cons {
+                    // 适配新的 TypeKey::Instantiated 结构
+                    if let TypeKey::Instantiated { def_id: cap_id, .. } = constraint_ty_key {
+                        // 4. 现在 self 是自由身，可以调用 &mut 方法了
+                        self.check_constraint(arg_ty, cap_id, span);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 递归验证 Impl 的约束条件 (Where Clauses)
+    fn verify_impl_obligations(&mut self, impl_id: DefId, mapping: &HashMap<DefId, TypeKey>, span: Span) -> bool {
+        // 1. 获取该 Impl 块定义的泛型参数列表
+        // 先 clone 出来，避免持有 self.ctx 的引用
+        let param_ids = match self.ctx.def_generic_params.get(&impl_id) {
+            Some(ids) => ids.clone(),
+            None => return true, // 没有泛型参数，也就没有约束
+        };
+
+        // 2. 遍历每一个泛型参数，检查其约束
+        for param_id in param_ids {
+            // 获取约束列表 (e.g. Clone, Debug)
+            let constraints = self.ctx.generic_constraints.get(&param_id).cloned().unwrap_or_default();
+
+            // 获取该参数对应的具体类型 (e.g. i32)
+            let concrete_ty = match mapping.get(&param_id) {
+                Some(ty) => ty,
+                None => continue, 
+            };
+
+            // 3. 对每一个约束进行递归检查
+            for constraint_key in constraints {
+                if let TypeKey::Instantiated { def_id: cap_id, args: cap_args } = constraint_key {
+                    // 如果约束本身带有泛型 (e.g. T: Converter<U>)，需要替换 U
+                    // 这里我们用 map_to_vec 将 mapping 转成 substitute 需要的 args
+                    let args_vec = self.map_to_vec(impl_id, mapping);
+                    
+                    // 实际上 cap_args 里的泛型参数也是属于 impl_id 的，所以可以直接替换
+                    let mut concrete_cap_args = Vec::new();
+                    for arg in cap_args {
+                        concrete_cap_args.push(
+                            self.ctx.substitute_generics(&arg, impl_id, &args_vec)
+                        );
+                    }
+                    
+                    // 此时我们还不能 check_constraint 带参数的 Cap (目前的 check_constraint 签名只接受 cap_id)
+                    // 但对于简单的 Cap (无泛型)，concrete_cap_args 为空
+                    // 这里为了严谨，我们只检查 Cap ID。
+                    // TODO: 升级 check_constraint 以支持带泛型的 Cap (如 check_trait_ref)
+                    
+                    // 递归检查：e.g. 检查 i32 是否实现了 Clone
+                    self.check_constraint(concrete_ty, cap_id, span);
+                }
+            }
+        }
+        true
+    }
+
+    /// 辅助：将泛型参数映射表 (Map) 转换为有序的实参列表 (Vec)
+    /// 用于为 substitute_generics 准备 args 参数
+    fn map_to_vec(&self, def_id: DefId, mapping: &HashMap<DefId, TypeKey>) -> Vec<TypeKey> {
+        // 1. 获取该定义 (Struct/Impl/Fn) 的泛型参数 ID 列表 (有序)
+        let param_ids = self.ctx.def_generic_params.get(&def_id)
+            .cloned()
+            .unwrap_or_default(); // 如果没有泛型，返回空列表
+
+        // 2. 按顺序从 mapping 中提取类型
+        let mut args = Vec::new();
+        for id in param_ids {
+            if let Some(ty) = mapping.get(&id) {
+                args.push(ty.clone());
+            } else {
+                // 如果 mapping 里缺了某个参数，说明 Unify 不完整
+                // 在这里可以报错，或者暂时填入 Error 类型防止 Panic
+                // 正常情况下只要 Unify 成功，这里一定有值
+                args.push(TypeKey::Error); 
+            }
+        }
+        args
+    }
+
+    /// 尝试将具体类型与模式类型进行匹配，并提取泛型参数的映射
+    /// concrete: 具体类型 (e.g. List<i32>)
+    /// pattern: 模式类型 (e.g. List<T>)
+    /// mapping: 输出参数，存储 T -> i32 的映射
+    /// 返回值: 是否匹配成功
+    fn unify_types(&self, concrete: &TypeKey, pattern: &TypeKey, mapping: &mut HashMap<DefId, TypeKey>) -> bool {
+        match (concrete, pattern) {
+            // 1. 如果 pattern 是泛型参数 T
+            (_, TypeKey::GenericParam(param_id)) => {
+                if let Some(existing) = mapping.get(param_id) {
+                    // 如果 T 之前已经映射过，必须与现在的类型一致
+                    // e.g. pattern: Pair<T, T>, concrete: Pair<i32, f64> -> 失败
+                    return existing == concrete;
+                } else {
+                    // 记录映射 T -> concrete
+                    mapping.insert(*param_id, concrete.clone());
+                    return true;
+                }
+            }
+
+            // 2. 基础类型：必须完全相等
+            (TypeKey::Primitive(p1), TypeKey::Primitive(p2)) => p1 == p2,
+
+            // 3. 指针/数组：递归匹配
+            (TypeKey::Pointer(inner1, mut1), TypeKey::Pointer(inner2, mut2)) => {
+                mut1 == mut2 && self.unify_types(inner1, inner2, mapping)
+            }
+            (TypeKey::Array(inner1, size1), TypeKey::Array(inner2, size2)) => {
+                size1 == size2 && self.unify_types(inner1, inner2, mapping)
+            }
+
+            // 4. 实例化类型 (Struct/Enum): List<i32> vs List<T>
+            (TypeKey::Instantiated { def_id: id1, args: args1 }, 
+             TypeKey::Instantiated { def_id: id2, args: args2 }) => {
+                if id1 != id2 || args1.len() != args2.len() {
+                    return false;
+                }
+                for (a1, a2) in args1.iter().zip(args2.iter()) {
+                    if !self.unify_types(a1, a2, mapping) {
+                        return false;
+                    }
+                }
+                true
+            }
+            
+            // 函数类型匹配 (递归)
+            (TypeKey::Function { params: p1, ret: r1, .. }, 
+             TypeKey::Function { params: p2, ret: r2, .. }) => {
+                if p1.len() != p2.len() { return false; }
+                for (a, b) in p1.iter().zip(p2.iter()) {
+                    if !self.unify_types(a, b, mapping) { return false; }
+                }
+                match (r1, r2) {
+                    (Some(x), Some(y)) => self.unify_types(x, y, mapping),
+                    (None, None) => true,
+                    _ => false,
+                }
+            }
+
+            // 其他情况不匹配
+            _ => false,
         }
     }
 
@@ -2660,6 +3141,7 @@ impl Analyzer {
     /// 4. 指针 <-> 整数 (size_t)
     /// 5. 指针 <-> 指针
     /// 6. 数组 -> 指针 (Array Decay)
+    /// 7. Enum -> 整数
     fn validate_cast(&self, src: &TypeKey, target: &TypeKey) -> bool {
         match (src, target) {
             (t1, t2) if t1 == t2 => true,
@@ -2679,6 +3161,14 @@ impl Analyzer {
             (TypeKey::Pointer(..), TypeKey::Pointer(..)) => true,
 
             (TypeKey::Array(..), TypeKey::Pointer(..)) => true,
+
+            (TypeKey::Instantiated { def_id, .. }, TypeKey::Primitive(p)) => {
+                if self.ctx.def_kind.get(def_id) == Some(&DefKind::Enum) {
+                    self.is_integer_type(p)
+                } else {
+                    false
+                }
+            }
 
             _ => false,
         }
